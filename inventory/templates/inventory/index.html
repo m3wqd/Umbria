@@ -1,0 +1,117 @@
+{% extends "base.html" %}
+
+{% block title %}IR Inventory{% endblock %}
+
+{% block content %}
+  <div class="grid">
+    <div class="card">
+      <h2>Взять на руки</h2>
+      <form method="post">
+        {% csrf_token %}
+        <input type="hidden" name="action" value="take" />
+
+        <div class="row">
+          <div>
+            <label>IRF-метка объекта</label>
+            <input name="irf_tag" placeholder="Напр. IRF-0001" />
+          </div>
+          <div>
+            <label>Метка/пропуск пользователя</label>
+            <input name="pass_tag" placeholder="Напр. U-12345" />
+          </div>
+        </div>
+
+        <div class="muted" style="margin-top:8px;">
+          Можно вводить вручную. Либо копировать из админки.
+        </div>
+
+        <div class="actions">
+          <button class="btn-primary" type="submit">Взять</button>
+        </div>
+      </form>
+    </div>
+
+    <div class="card">
+      <h2>Вернуть</h2>
+      <form method="post">
+        {% csrf_token %}
+        <input type="hidden" name="action" value="return" />
+
+        <label>IRF-метка объекта</label>
+        <input name="irf_tag" placeholder="Напр. IRF-0001" />
+
+        <label>Куда вернуть (ячейка, опционально)</label>
+        <input name="cell_code" placeholder="Напр. A-01" />
+
+        <div class="actions">
+          <button class="btn-secondary" type="submit">Вернуть</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <div class="grid" style="margin-top:14px;">
+    <div class="card">
+      <h2>Сейчас на руках</h2>
+      {% if active_handouts %}
+        <table>
+          <thead>
+            <tr>
+              <th>Объект</th>
+              <th>У кого</th>
+              <th>Выдан</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for h in active_handouts %}
+              <tr>
+                <td><span class="badge">{{ h.object.irf_tag }}</span> {{ h.object.name }}</td>
+                <td><span class="badge">{{ h.user.pass_tag }}</span> {{ h.user.full_name }}</td>
+                <td>{{ h.issued_at }}</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      {% else %}
+        <div class="muted">Активных выдач нет.</div>
+      {% endif %}
+    </div>
+
+    <div class="card">
+      <h2>Объекты</h2>
+      {% if objects %}
+        <table>
+          <thead>
+            <tr>
+              <th>IRF</th>
+              <th>Имя</th>
+              <th>Где</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for o in objects %}
+              <tr>
+                <td><span class="badge">{{ o.irf_tag }}</span></td>
+                <td>{{ o.name }}</td>
+                <td>
+                  {% if o.cell %}
+                    Ячейка: <span class="badge">{{ o.cell.cell_code }}</span>
+                  {% else %}
+                    На руках
+                  {% endif %}
+                </td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      {% else %}
+        <div class="muted">Пока нет объектов. Добавь их в админке.</div>
+      {% endif %}
+
+      <div class="muted" style="margin-top:10px;">
+        Подсказка: сначала добавь в админке ячейки, пользователей и объекты.
+      </div>
+    </div>
+  </div>
+{% endblock %}
+
