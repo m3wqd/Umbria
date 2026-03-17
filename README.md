@@ -71,7 +71,7 @@ Umbria - это система автоматизированные аренда
 
 `bash
 # Клонировать репозиторий
-git clone https://github.com/m3wqd/umbria.git
+git clone https://github.com/m3wqd/Umbria.git
 
 cd umbria
 
