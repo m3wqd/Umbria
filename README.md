@@ -58,11 +58,11 @@ Umbria - это система автоматизированные аренда
 
 Пример (можешь заменить под себя):
 
-- Backend: Django / ASP.NET / Node.js
-- БД: PostgreSQL / SQLite
+- Backend: Django 
+- БД: SQLite
 - API: REST
 - Дополнительно:
-  - RFID / QR интеграция
+  - RFID 
   - WebSocket (для обновлений в реальном времени)
 
 ---
