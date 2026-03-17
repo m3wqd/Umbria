@@ -69,7 +69,7 @@ Umbria - это система автоматизированные аренда
 
 ## 🛠 Установка и запуск
 
-`bash
+
 # Клонировать репозиторий
 git clone https://github.com/m3wqd/Umbria.git
 
