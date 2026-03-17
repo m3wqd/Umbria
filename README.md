@@ -70,16 +70,16 @@ Umbria - это система автоматизированные аренда
 ## 🛠 Установка и запуск
 
 
-# Клонировать репозиторий
+### Клонировать репозиторий
 git clone https://github.com/m3wqd/Umbria.git
 
 cd umbria
 
-# Установить зависимости
+### Установить зависимости
 pip install -r requirements.txt
 
-# Применить миграции
+### Применить миграции
 python manage.py migrate
 
-# Запуск сервера
+### Запуск сервера
 python manage.py runserver
