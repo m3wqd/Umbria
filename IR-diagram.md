@@ -49,7 +49,7 @@ erDiagram
   }
 ```
 
-### Сущности и поля
+### Сущности и поля.
 
 #### `OBJECTS` — Объекты
 - **`irf_tag` (string, UNIQUE, NOT NULL)**: IRF-метка объекта.
