@@ -73,7 +73,7 @@ Umbria - это система автоматизированные аренда
 ### Клонировать репозиторий
 git clone https://github.com/m3wqd/Umbria.git
 
-cd umbria
+cd Umbria
 
 ### Установить зависимости
 pip install -r requirements.txt
