@@ -1,12 +1,44 @@
 from __future__ import annotations
-
 from django.contrib import messages
 from django.db import transaction
 from django.http import HttpRequest, HttpResponse
 from django.shortcuts import redirect, render
 from django.utils import timezone
-
 from .models import Cell, Handout, TrackedObject, UserTag
+import requests
+import requests_mock
+
+
+
+def test_signal(request):
+    # Подключение к имитации ардуино
+    url = "http://127.0.0" 
+    try:
+        response = requests.get(url, timeout=2)
+        return HttpResponse(f"Ардуино ответила: {response.text}")
+    except:
+        return HttpResponse("Ошибка: Заглушка не запущена!", status=500)
+
+
+
+# def send_command_to_arduino(request):
+#     with requests_mock.Mocker() as m:
+#         # Перехватываем запрос на этот адрес
+#         m.get('http://fake-arduino.local', text='Success', status_code=200)
+        
+#         response = requests.get('http://fake-arduino.local')
+#         return HttpResponse(f"Тестовый ответ: {response.text}")
+
+
+# def trigger_arduino(request):
+#     arduino_ip = "http://192.168.1" # IP  Arduino
+#     try:
+#         response = requests.get(arduino_ip, timeout=5)
+#         return HttpResponse(f"Статус ответа: {response.status_code}")
+#     except requests.exceptions.RequestException as e:
+#         return HttpResponse(f"Ошибка связи: {e}")
+
+
 
 def index(request: HttpRequest) -> HttpResponse:
     if request.method == "POST":
