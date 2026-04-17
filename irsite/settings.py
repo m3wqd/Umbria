@@ -1,10 +1,26 @@
 from pathlib import Path
+import os
 
+DEBUG = os.environ.get("DJANGO_DEBUG", "0") == "1"
+
+ALLOWED_HOSTS = [
+    "193.233.217.190",
+    "localhost",
+    "127.0.0.1",
+]
+
+# Для продакшна лучше через переменную окружения
+SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY", "dev-secret-key-change-me")
+
+# CSRF для HTTPS (если будет)
+CSRF_TRUSTED_ORIGINS = [
+    "http://193.233.217.190",
+    "http://193.233.217.190:8000",
+]
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 SECRET_KEY = "dev-secret-key-change-me"
 DEBUG = True
-ALLOWED_HOSTS: list[str] = []
 
 INSTALLED_APPS = [
     "django.contrib.admin",
