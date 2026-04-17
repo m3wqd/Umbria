@@ -7,17 +7,76 @@ from django.utils import timezone
 from .models import Cell, Handout, TrackedObject, UserTag
 import requests
 import requests_mock
+import json
+from django.views.decorators.csrf import csrf_exempt
+from django.views.decorators.http import require_POST
+from django.http import JsonResponse
 
 
-
-def test_signal(request):
-    # Подключение к имитации ардуино
-    url = "http://127.0.0" 
+@csrf_exempt
+@require_POST
+def api_rent(request: HttpRequest) -> JsonResponse:
+    """
+    API для Arduino.
+    Ожидает JSON: {"user_uid": "...", "object_uid": "..."}
+    Возвращает: {"action": "take"|"return"|"error", "message": "..."}
+    """
     try:
-        response = requests.get(url, timeout=2)
-        return HttpResponse(f"Ардуино ответила: {response.text}")
-    except:
-        return HttpResponse("Ошибка: Заглушка не запущена!", status=500)
+        data = json.loads(request.body.decode("utf-8"))
+    except json.JSONDecodeError:
+        return JsonResponse({"action": "error", "message": "invalid json"}, status=400)
+
+    user_uid = (data.get("user_uid") or "").strip()
+    object_uid = (data.get("object_uid") or "").strip()
+
+    if not user_uid or not object_uid:
+        return JsonResponse(
+            {"action": "error", "message": "user_uid and object_uid required"},
+            status=400,
+        )
+
+    try:
+        user = UserTag.objects.get(pass_tag=user_uid)
+    except UserTag.DoesNotExist:
+        return JsonResponse(
+            {"action": "error", "message": f"user {user_uid} not found"}, status=404
+        )
+
+    try:
+        obj = TrackedObject.objects.get(irf_tag=object_uid)
+    except TrackedObject.DoesNotExist:
+        return JsonResponse(
+            {"action": "error", "message": f"object {object_uid} not found"}, status=404
+        )
+
+    with transaction.atomic():
+        active = (
+            Handout.objects.select_for_update()
+            .filter(object=obj, returned_at__isnull=True)
+            .first()
+        )
+
+        if active is None:
+            # объект в ячейке → выдаём
+            obj.cell = None
+            obj.save(update_fields=["cell"])
+            Handout.objects.create(object=obj, user=user, issued_at=timezone.now())
+            return JsonResponse({"action": "take", "message": "issued"})
+        else:
+            # объект на руках → возвращаем
+            active.returned_at = timezone.now()
+            active.save(update_fields=["returned_at"])
+            return JsonResponse({"action": "return", "message": "returned"})
+
+
+# def test_signal(request):
+#     # Подключение к имитации ардуино
+#     url = "http://127.0.0" 
+#     try:
+#         response = requests.get(url, timeout=2)
+#         return HttpResponse(f"Ардуино ответила: {response.text}")
+#     except:
+#         return HttpResponse("Ошибка: Заглушка не запущена!", status=500)
 
 
 
