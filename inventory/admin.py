@@ -41,4 +41,11 @@ class HandoutAdmin(admin.ModelAdmin):
     @admin.action(description="Отметить как возвращённые (сейчас)")
     def mark_returned_now(self, request, queryset):
         queryset.filter(returned_at__isnull=True).update(returned_at=timezone.now())
+    
+    @admin.register(TrackedObject)
+    class TrackedObjectAdmin(admin.ModelAdmin):
+        list_display = ("irf_tag", "name", "cell", "home_cell", "state", "created_at")
+        search_fields = ("irf_tag", "name")
+        list_filter = ("state", "cell")
+        autocomplete_fields = ("cell", "home_cell")
 

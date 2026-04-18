@@ -251,34 +251,99 @@
         </div>
     </div>
 
-    {# Активные выдачи #}
-    <div class="panel">
-        <div class="panel-title">Сейчас на руках</div>
-        <table>
-            <thead>
-                <tr>
-                    <th>Зонт</th>
-                    <th>Метка</th>
-                    <th>Пользователь</th>
-                    <th>Пропуск</th>
-                    <th>Выдан</th>
-                </tr>
-            </thead>
-            <tbody>
-                {% for h in active_handouts %}
-                    <tr>
-                        <td>{{ h.object.name|default:"—" }}</td>
-                        <td><code>{{ h.object.irf_tag }}</code></td>
-                        <td>{{ h.user.full_name|default:"—" }}</td>
-                        <td><code>{{ h.user.pass_tag }}</code></td>
-                        <td>{{ h.issued_at|date:"d.m.Y H:i" }}</td>
-                    </tr>
-                {% empty %}
-                    <tr class="empty-row"><td colspan="5">Нет активных выдач</td></tr>
-                {% endfor %}
-            </tbody>
-        </table>
+    <!-- ===== ТАБЛИЦА АКТИВНЫХ ВЫДАЧ ===== -->
+<div class="card mb-4">
+    <div class="card-header">
+        <strong>Сейчас на руках</strong>
+        <span class="text-muted small" id="last-update">обновлено только что</span>
     </div>
+    <table class="table mb-0" id="handouts-table">
+        <thead>
+            <tr>
+                <th>Зонт</th>
+                <th>Метка</th>
+                <th>Пользователь</th>
+                <th>Пропуск</th>
+                <th>Выдан</th>
+            </tr>
+        </thead>
+        <tbody id="handouts-body">
+            <!-- Начальное состояние рендерится с сервера -->
+            {% for h in active_handouts %}
+                <tr>
+                    <td>{{ h.object.name|default:"Объект" }}</td>
+                    <td><code>{{ h.object.irf_tag }}</code></td>
+                    <td>{{ h.user.full_name|default:"—" }}</td>
+                    <td><code>{{ h.user.pass_tag }}</code></td>
+                    <td>{{ h.issued_at|date:"d.m.Y H:i:s" }}</td>
+                </tr>
+            {% empty %}
+                <tr>
+                    <td colspan="5" class="text-center text-muted fst-italic">
+                        Нет активных выдач
+                    </td>
+                </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+<!-- ===== СКРИПТ АВТООБНОВЛЕНИЯ ===== -->
+<script>
+(function () {
+    const tbody = document.getElementById('handouts-body');
+    const lastUpdate = document.getElementById('last-update');
+    const API_URL = "{% url 'inventory:api_active' %}";
+    const REFRESH_MS = 2000;   // частота обновления (2 сек)
+
+    function escapeHtml(str) {
+        return String(str ?? '')
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
+    }
+
+    function render(handouts) {
+        if (!handouts.length) {
+            tbody.innerHTML = `
+                <tr>
+                    <td colspan="5" class="text-center text-muted fst-italic">
+                        Нет активных выдач
+                    </td>
+                </tr>`;
+            return;
+        }
+
+        tbody.innerHTML = handouts.map(h => `
+            <tr>
+                <td>${escapeHtml(h.object_name)}</td>
+                <td><code>${escapeHtml(h.object_tag)}</code></td>
+                <td>${escapeHtml(h.user_name)}</td>
+                <td><code>${escapeHtml(h.user_tag)}</code></td>
+                <td>${escapeHtml(h.issued_at)}</td>
+            </tr>`).join('');
+    }
+
+    async function refresh() {
+        try {
+            const response = await fetch(API_URL, { cache: 'no-store' });
+            if (!response.ok) return;
+            const data = await response.json();
+            render(data.handouts || []);
+            const now = new Date();
+            lastUpdate.textContent =
+                'обновлено в ' + now.toLocaleTimeString('ru-RU');
+        } catch (err) {
+            console.error('Ошибка обновления:', err);
+        }
+    }
+
+    // Запуск
+    setInterval(refresh, REFRESH_MS);
+})();
+</script>
 
     {# Все зонты #}
     <div class="panel">

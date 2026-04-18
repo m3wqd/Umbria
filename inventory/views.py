@@ -256,3 +256,31 @@ def index(request: HttpRequest) -> HttpResponse:
             "users": users,
         },
     )
+    from django.views.decorators.http import require_GET
+
+
+@require_GET
+def api_active_handouts(request: HttpRequest) -> JsonResponse:
+    """
+    Возвращает список активных выдач для обновления таблицы на сайте.
+    GET /api/active/
+    """
+    handouts = (
+        Handout.objects
+        .select_related("object", "user")
+        .filter(returned_at__isnull=True)
+        .order_by("-issued_at")
+    )
+
+    data = [
+        {
+            "object_name": h.object.name or "Объект",
+            "object_tag": h.object.irf_tag,
+            "user_name": h.user.full_name or "Без имени",
+            "user_tag": h.user.pass_tag,
+            "issued_at": timezone.localtime(h.issued_at).strftime("%d.%m.%Y %H:%M:%S"),
+        }
+        for h in handouts
+    ]
+
+    return JsonResponse({"handouts": data})
