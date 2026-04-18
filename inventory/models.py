@@ -43,6 +43,15 @@ class TrackedObject(models.Model):
         blank=True,
         on_delete=models.SET_NULL,
         related_name="tracked_objects",
+        help_text="Текущее местоположение (None = на руках)",
+    )
+    home_cell = models.ForeignKey(
+        Cell,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="home_objects",
+        help_text="Родная ячейка, куда зонт возвращается по умолчанию",
     )
     state = models.CharField(max_length=32, blank=True, default="ok")
     created_at = models.DateTimeField(auto_now_add=True)
@@ -89,4 +98,3 @@ class Handout(models.Model):
             raise ValidationError(
                 {"object": "Нельзя выдать объект на руки, пока он находится в ячейке."}
             )
-
