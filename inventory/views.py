@@ -1,25 +1,54 @@
 from __future__ import annotations
 from django.contrib import messages
 from django.db import transaction
-from django.http import HttpRequest, HttpResponse
+from django.db.models import OuterRef, Exists
+from django.http import HttpRequest, HttpResponse, JsonResponse
 from django.shortcuts import redirect, render
 from django.utils import timezone
-from .models import Cell, Handout, TrackedObject, UserTag
-import requests
-import requests_mock
-import json
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_POST
-from django.http import JsonResponse
+import json
 
+from .models import Cell, Handout, TrackedObject, UserTag
+
+
+# ---------- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ----------
+
+def _get_free_object() -> TrackedObject | None:
+    """Любой объект, который лежит в ячейке и не на руках."""
+    active_handouts = Handout.objects.filter(
+        object=OuterRef("pk"), returned_at__isnull=True
+    )
+    return (
+        TrackedObject.objects
+        .filter(cell__isnull=False)
+        .annotate(has_active=Exists(active_handouts))
+        .filter(has_active=False)
+        .order_by("irf_tag")
+        .first()
+    )
+
+
+def _get_free_cell() -> Cell | None:
+    """Любая свободная ячейка (без объектов)."""
+    return (
+        Cell.objects
+        .filter(tracked_objects__isnull=True, status="active")
+        .order_by("cell_code")
+        .first()
+    )
+
+
+# ---------- API ДЛЯ ARDUINO ----------
 
 @csrf_exempt
 @require_POST
 def api_rent(request: HttpRequest) -> JsonResponse:
     """
-    API для Arduino.
-    Ожидает JSON: {"user_uid": "...", "object_uid": "..."}
-    Возвращает: {"action": "take"|"return"|"error", "message": "..."}
+    Упрощённый API: достаточно пропуска пользователя.
+    Ожидает JSON: {"user_uid": "..."}
+    - Если у пользователя есть активная выдача → возвращаем объект в свободную ячейку
+    - Иначе → выдаём любой свободный объект
     """
     try:
         data = json.loads(request.body.decode("utf-8"))
@@ -27,12 +56,9 @@ def api_rent(request: HttpRequest) -> JsonResponse:
         return JsonResponse({"action": "error", "message": "invalid json"}, status=400)
 
     user_uid = (data.get("user_uid") or "").strip()
-    object_uid = (data.get("object_uid") or "").strip()
-
-    if not user_uid or not object_uid:
+    if not user_uid:
         return JsonResponse(
-            {"action": "error", "message": "user_uid and object_uid required"},
-            status=400,
+            {"action": "error", "message": "user_uid required"}, status=400
         )
 
     try:
@@ -42,141 +68,129 @@ def api_rent(request: HttpRequest) -> JsonResponse:
             {"action": "error", "message": f"user {user_uid} not found"}, status=404
         )
 
-    try:
-        obj = TrackedObject.objects.get(irf_tag=object_uid)
-    except TrackedObject.DoesNotExist:
-        return JsonResponse(
-            {"action": "error", "message": f"object {object_uid} not found"}, status=404
-        )
-
     with transaction.atomic():
+        # Есть ли у пользователя активная выдача?
         active = (
             Handout.objects.select_for_update()
-            .filter(object=obj, returned_at__isnull=True)
+            .filter(user=user, returned_at__isnull=True)
+            .select_related("object")
             .first()
         )
 
-        if active is None:
-            # объект в ячейке → выдаём
+        if active:
+            # ВОЗВРАТ
+            free_cell = _get_free_cell()
+            if not free_cell:
+                return JsonResponse(
+                    {"action": "error", "message": "no free cells"}, status=409
+                )
+
+            active.returned_at = timezone.now()
+            active.save(update_fields=["returned_at"])
+
+            obj = active.object
+            obj.cell = free_cell
+            obj.save(update_fields=["cell"])
+
+            return JsonResponse({
+                "action": "return",
+                "message": "returned",
+                "object_uid": obj.irf_tag,
+                "cell_code": free_cell.cell_code,
+            })
+        else:
+            # ВЫДАЧА
+            obj = _get_free_object()
+            if not obj:
+                return JsonResponse(
+                    {"action": "error", "message": "no free objects"}, status=409
+                )
+
             obj.cell = None
             obj.save(update_fields=["cell"])
             Handout.objects.create(object=obj, user=user, issued_at=timezone.now())
-            return JsonResponse({"action": "take", "message": "issued"})
-        else:
-            # объект на руках → возвращаем
-            active.returned_at = timezone.now()
-            active.save(update_fields=["returned_at"])
-            return JsonResponse({"action": "return", "message": "returned"})
+
+            return JsonResponse({
+                "action": "take",
+                "message": "issued",
+                "object_uid": obj.irf_tag,
+            })
 
 
-# def test_signal(request):
-#     # Подключение к имитации ардуино
-#     url = "http://127.0.0" 
-#     try:
-#         response = requests.get(url, timeout=2)
-#         return HttpResponse(f"Ардуино ответила: {response.text}")
-#     except:
-#         return HttpResponse("Ошибка: Заглушка не запущена!", status=500)
-
-
-
-# def send_command_to_arduino(request):
-#     with requests_mock.Mocker() as m:
-#         # Перехватываем запрос на этот адрес
-#         m.get('http://fake-arduino.local', text='Success', status_code=200)
-        
-#         response = requests.get('http://fake-arduino.local')
-#         return HttpResponse(f"Тестовый ответ: {response.text}")
-
-
-# def trigger_arduino(request):
-#     arduino_ip = "http://192.168.1" # IP  Arduino
-#     try:
-#         response = requests.get(arduino_ip, timeout=5)
-#         return HttpResponse(f"Статус ответа: {response.status_code}")
-#     except requests.exceptions.RequestException as e:
-#         return HttpResponse(f"Ошибка связи: {e}")
-
-
+# ---------- ГЛАВНАЯ СТРАНИЦА ----------
 
 def index(request: HttpRequest) -> HttpResponse:
     if request.method == "POST":
         action = request.POST.get("action", "")
-        irf_tag = (request.POST.get("irf_tag") or "").strip()
         pass_tag = (request.POST.get("pass_tag") or "").strip()
 
+        if not pass_tag:
+            messages.error(request, "Нужно указать метку/пропуск пользователя.")
+            return redirect("inventory:index")
+
+        try:
+            user = UserTag.objects.get(pass_tag=pass_tag)
+        except UserTag.DoesNotExist:
+            messages.error(request, f"Пользователь с меткой/пропуском '{pass_tag}' не найден.")
+            return redirect("inventory:index")
+
+        # ---------- ВЗЯТИЕ ----------
         if action == "take":
-            if not irf_tag or not pass_tag:
-                messages.error(request, "Нужно указать IRF-метку объекта и метку/пропуск пользователя.")
-                return redirect("inventory:index")
-
-            try:
-                obj = TrackedObject.objects.get(irf_tag=irf_tag)
-            except TrackedObject.DoesNotExist:
-                messages.error(request, f"Объект с IRF-меткой '{irf_tag}' не найден.")
-                return redirect("inventory:index")
-
-            try:
-                user = UserTag.objects.get(pass_tag=pass_tag)
-            except UserTag.DoesNotExist:
-                messages.error(request, f"Пользователь с меткой/пропуском '{pass_tag}' не найден.")
-                return redirect("inventory:index")
-
             with transaction.atomic():
-                active_exists = Handout.objects.filter(object=obj, returned_at__isnull=True).exists()
-                if active_exists:
-                    messages.error(request, "Этот объект уже находится на руках (есть активная выдача).")
+                # Не даём взять второй зонт, если уже есть активная выдача
+                already = Handout.objects.filter(user=user, returned_at__isnull=True).exists()
+                if already:
+                    messages.error(request, "У вас уже есть зонт на руках. Сначала верните его.")
+                    return redirect("inventory:index")
+
+                obj = _get_free_object()
+                if not obj:
+                    messages.error(request, "Нет свободных зонтов.")
                     return redirect("inventory:index")
 
                 obj.cell = None
                 obj.save(update_fields=["cell"])
-
                 Handout.objects.create(object=obj, user=user, issued_at=timezone.now())
 
-            messages.success(request, "Объект выдан на руки.")
+            messages.success(request, f"Вам выдан зонт: {obj.name or obj.irf_tag}.")
             return redirect("inventory:index")
 
+        # ---------- ВОЗВРАТ ----------
         if action == "return":
-            if not irf_tag:
-                messages.error(request, "Нужно указать IRF-метку объекта.")
-                return redirect("inventory:index")
-
-            cell_code = (request.POST.get("cell_code") or "").strip()
-            try:
-                obj = TrackedObject.objects.get(irf_tag=irf_tag)
-            except TrackedObject.DoesNotExist:
-                messages.error(request, f"Объект с IRF-меткой '{irf_tag}' не найден.")
-                return redirect("inventory:index")
-
             with transaction.atomic():
                 active = (
                     Handout.objects.select_for_update()
-                    .filter(object=obj, returned_at__isnull=True)
+                    .filter(user=user, returned_at__isnull=True)
+                    .select_related("object")
                     .order_by("-issued_at")
                     .first()
                 )
                 if not active:
-                    messages.error(request, "Для этого объекта нет активной выдачи.")
+                    messages.error(request, "У вас нет зонтов на руках.")
+                    return redirect("inventory:index")
+
+                free_cell = _get_free_cell()
+                if not free_cell:
+                    messages.error(request, "Нет свободных ячеек для возврата.")
                     return redirect("inventory:index")
 
                 active.returned_at = timezone.now()
                 active.save(update_fields=["returned_at"])
 
-                if cell_code:
-                    try:
-                        cell = Cell.objects.get(cell_code=cell_code)
-                    except Cell.DoesNotExist:
-                        messages.error(request, f"Ячейка '{cell_code}' не найдена.")
-                        return redirect("inventory:index")
-                    obj.cell = cell
-                    obj.save(update_fields=["cell"])
+                obj = active.object
+                obj.cell = free_cell
+                obj.save(update_fields=["cell"])
 
-            messages.success(request, "Объект возвращён.")
+            messages.success(
+                request,
+                f"Зонт {obj.name or obj.irf_tag} возвращён в ячейку {free_cell.cell_code}."
+            )
             return redirect("inventory:index")
 
         messages.error(request, "Неизвестное действие.")
         return redirect("inventory:index")
 
+    # GET
     objects = TrackedObject.objects.select_related("cell").order_by("irf_tag")
     active_handouts = (
         Handout.objects.select_related("object", "user")
@@ -196,4 +210,3 @@ def index(request: HttpRequest) -> HttpResponse:
             "users": users,
         },
     )
-
