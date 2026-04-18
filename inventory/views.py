@@ -56,13 +56,18 @@ def api_rent(request: HttpRequest) -> JsonResponse:
             {"action": "error", "message": "uid required"}, status=400
         )
 
+    print(f"[api_rent] UID получен: {uid!r}")
+
     # --- Поиск клиента по RFID-карте ---
     try:
         user = UserTag.objects.get(pass_tag=uid)
     except UserTag.DoesNotExist:
+        print(f"[api_rent] Карта не зарегистрирована: {uid!r}")
         return JsonResponse(
             {"action": "error", "message": "card not registered"}, status=404
         )
+
+    print(f"[api_rent] Клиент: {user.full_name or '(без имени)'} [{user.pass_tag}]")
 
     # --- Логика: аренда или возврат ---
     with transaction.atomic():
@@ -73,13 +78,15 @@ def api_rent(request: HttpRequest) -> JsonResponse:
             .first()
         )
 
-        # === ВОЗВРАТ ===
+        # ============ ВОЗВРАТ ============
         if active:
+            obj = active.object
+            print(f"[api_rent] ВОЗВРАТ зонта {obj.irf_tag}")
+
             active.returned_at = timezone.now()
             active.save(update_fields=["returned_at"])
 
-            # Зонт автоматически возвращается в свою "родную" ячейку
-            obj = active.object
+            # Зонт возвращается в свою "родную" ячейку
             if obj.home_cell_id:
                 obj.cell = obj.home_cell
                 obj.save(update_fields=["cell"])
@@ -90,7 +97,8 @@ def api_rent(request: HttpRequest) -> JsonResponse:
                 "message": "возврат принят",
             })
 
-        # === ВЫДАЧА ===
+        # ============ ВЫДАЧА ============
+        # Свободный зонт = находится в ячейке И нет открытой выдачи
         umbrella = (
             TrackedObject.objects
             .filter(cell__isnull=False)
@@ -100,6 +108,15 @@ def api_rent(request: HttpRequest) -> JsonResponse:
         )
 
         if not umbrella:
+            # Диагностика — почему не нашли
+            total    = TrackedObject.objects.count()
+            in_cell  = TrackedObject.objects.filter(cell__isnull=False).count()
+            on_hands = TrackedObject.objects.filter(cell__isnull=True).count()
+            open_h   = Handout.objects.filter(returned_at__isnull=True).count()
+            print(
+                f"[api_rent] НЕТ СВОБОДНЫХ: "
+                f"всего={total}, в_ячейке={in_cell}, на_руках={on_hands}, открытых_выдач={open_h}"
+            )
             return JsonResponse(
                 {"action": "error", "message": "нет свободных зонтов"},
                 status=409,
@@ -118,6 +135,7 @@ def api_rent(request: HttpRequest) -> JsonResponse:
             issued_at=timezone.now(),
         )
 
+        print(f"[api_rent] ВЫДАН зонт {umbrella.irf_tag}")
         return JsonResponse({
             "action": "take",
             "umbrella": umbrella.irf_tag,
@@ -256,8 +274,11 @@ def index(request: HttpRequest) -> HttpResponse:
             "users": users,
         },
     )
-    from django.views.decorators.http import require_GET
 
+
+# =====================================================================
+#  API: активные выдачи (для обновления таблицы на сайте)
+# =====================================================================
 
 @require_GET
 def api_active_handouts(request: HttpRequest) -> JsonResponse:
