@@ -88,4 +88,4 @@ STATICFILES_DIRS = [BASE_DIR / "static"]
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 LOGIN_URL = "/admin/login/"
-ARDUINO_TOKEN = os.environ.get("ARDUINO_TOKEN", "SECRET_TOKEN_123")
+ARDUINO_TOKEN = os.environ.get("BMSTU2026", "BMSTU2026")
