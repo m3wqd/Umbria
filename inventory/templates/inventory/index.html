@@ -223,7 +223,7 @@
 </head>
 <body>
     <div class="container">
-        <h1>☂ Umbria — Прокат зонтов</h1>
+        <h1>☂ Umbria - Прокат зонтов</h1>
 
         {# Сообщения #}
         {% if messages %}
@@ -258,7 +258,7 @@
         <div class="actions">
             {# Взятие #}
             <div class="action-card take">
-                <h3>🌂 Взять зонт</h3>
+                <h3>Взять зонт</h3>
                 <form method="post">
                     {% csrf_token %}
                     <input type="hidden" name="action" value="take">
@@ -276,7 +276,7 @@
 
             {# Возврат #}
             <div class="action-card return">
-                <h3>✅ Вернуть зонт</h3>
+                <h3>Вернуть зонт</h3>
                 <form method="post">
                     {% csrf_token %}
                     <input type="hidden" name="action" value="return">
@@ -294,7 +294,7 @@
         </div>
 
         {# Активные выдачи #}
-        <h2>📋 Активные выдачи</h2>
+        <h2>Активные выдачи</h2>
         <div class="table-wrapper">
             {% if active_handouts %}
                 <table>
