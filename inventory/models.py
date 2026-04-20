@@ -48,7 +48,7 @@ class TrackedObject(models.Model):
         on_delete=models.SET_NULL,
         null=True,
         blank=True,
-        related_name="objects",
+        related_name="current_objects",   # ← ИСПРАВЛЕНО (было "objects")
         verbose_name="Текущая ячейка",
         help_text="Где зонт сейчас. NULL — на руках у клиента.",
     )
@@ -69,6 +69,8 @@ class TrackedObject(models.Model):
     )
     created_at = models.DateTimeField(
         auto_now_add=True,
+        null=True,
+        blank=True,
         verbose_name="Дата добавления",
     )
 
@@ -126,6 +128,8 @@ class UserTag(models.Model):
     )
     created_at = models.DateTimeField(
         auto_now_add=True,
+        null=True,
+        blank=True,
         verbose_name="Дата регистрации",
     )
 
