@@ -3,387 +3,365 @@
 <html lang="ru">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Прокат зонтов</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Umbria — учёт зонтов</title>
     <style>
+        * { box-sizing: border-box; }
         body {
-            font-family: system-ui, -apple-system, Arial, sans-serif;
-            background: #f4f4f4;
-            color: #222;
             margin: 0;
-            padding: 24px;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            background: #f4f6fa;
+            color: #2c3e50;
+            padding: 20px;
+        }
+        h1 {
+            margin: 0 0 20px;
+            font-size: 28px;
+            color: #34495e;
+        }
+        h2 {
+            margin: 30px 0 12px;
+            font-size: 20px;
+            color: #34495e;
+        }
+
+        /* ───── Плашка сушилки (fixed, в углу) ───── */
+        #dryer-box {
+            position: fixed;
+            top: 15px;
+            right: 15px;
+            z-index: 999;
+            padding: 12px 18px;
+            border-radius: 12px;
             font-size: 15px;
-            line-height: 1.5;
+            font-weight: 500;
+            background: #e0e0e0;
+            color: #555;
+            box-shadow: 0 4px 12px rgba(0,0,0,.15);
+            transition: all .3s ease;
+            max-width: 360px;
+        }
+        #dryer-box.active {
+            background: linear-gradient(135deg, #ff9a44, #fc6076);
+            color: white;
+            animation: pulse 1.5s ease-in-out infinite;
+        }
+        @keyframes pulse {
+            0%, 100% { transform: scale(1); }
+            50%      { transform: scale(1.04); }
         }
 
-        .wrap {
-            max-width: 960px;
-            margin: 0 auto;
-        }
-
-        header {
-            border-bottom: 2px solid #333;
-            padding-bottom: 12px;
-            margin-bottom: 24px;
-        }
-
-        header h1 {
-            margin: 0;
-            font-size: 22px;
-            font-weight: 600;
-        }
-
-        header .sub {
-            color: #666;
-            font-size: 13px;
-            margin-top: 2px;
-        }
-
-        /* Сообщения */
-        .msg {
-            padding: 10px 14px;
-            margin-bottom: 10px;
-            border: 1px solid;
-            border-radius: 3px;
-            font-size: 14px;
-        }
-
-        .msg.success {
-            background: #e8f5e9;
-            border-color: #81c784;
-            color: #2e7d32;
-        }
-
-        .msg.error {
-            background: #fdecea;
-            border-color: #e57373;
-            color: #c62828;
-        }
-
-        /* Блоки */
-        .panel {
-            background: #fff;
-            border: 1px solid #ddd;
-            border-radius: 4px;
+        /* ───── Сообщения ───── */
+        .messages {
             margin-bottom: 20px;
         }
-
-        .panel-title {
-            background: #f9f9f9;
-            border-bottom: 1px solid #ddd;
-            padding: 10px 16px;
-            font-weight: 600;
+        .msg {
+            padding: 10px 15px;
+            border-radius: 8px;
+            margin-bottom: 8px;
             font-size: 14px;
         }
+        .msg.success { background: #d4edda; color: #155724; }
+        .msg.error   { background: #f8d7da; color: #721c24; }
+        .msg.info    { background: #d1ecf1; color: #0c5460; }
 
-        .panel-body {
-            padding: 16px;
-        }
-
-        /* Формы */
-        .forms {
+        /* ───── Карточки действий ───── */
+        .cards {
             display: grid;
-            grid-template-columns: 1fr 1fr;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
             gap: 20px;
-            margin-bottom: 24px;
+            margin-bottom: 30px;
         }
-
-        @media (max-width: 600px) {
-            .forms { grid-template-columns: 1fr; }
+        .card {
+            background: white;
+            padding: 20px;
+            border-radius: 12px;
+            box-shadow: 0 2px 8px rgba(0,0,0,.05);
         }
-
-        form label {
+        .card h3 {
+            margin: 0 0 15px;
+            font-size: 17px;
+            color: #2c3e50;
+        }
+        .card label {
             display: block;
+            margin-bottom: 12px;
             font-size: 13px;
-            color: #555;
-            margin-bottom: 4px;
+            color: #666;
         }
-
-        form input[type="text"] {
+        .card input, .card select {
             width: 100%;
             padding: 8px 10px;
-            border: 1px solid #bbb;
-            border-radius: 3px;
+            border: 1px solid #ddd;
+            border-radius: 6px;
             font-size: 14px;
-            box-sizing: border-box;
-            font-family: inherit;
+            margin-top: 4px;
         }
-
-        form input[type="text"]:focus {
-            outline: none;
-            border-color: #3a7bd5;
-        }
-
-        form button {
-            margin-top: 10px;
-            padding: 8px 16px;
-            background: #3a7bd5;
-            color: #fff;
-            border: 1px solid #2c5fa5;
-            border-radius: 3px;
-            font-size: 14px;
+        .card button {
+            width: 100%;
+            padding: 10px;
+            border: none;
+            border-radius: 6px;
+            font-size: 15px;
+            font-weight: 500;
             cursor: pointer;
-            font-family: inherit;
+            transition: background .2s;
         }
+        .btn-take   { background: #3498db; color: white; }
+        .btn-take:hover   { background: #2980b9; }
+        .btn-return { background: #2ecc71; color: white; }
+        .btn-return:hover { background: #27ae60; }
 
-        form button:hover {
-            background: #2c5fa5;
-        }
-
-        form button.secondary {
-            background: #555;
-            border-color: #444;
-        }
-
-        form button.secondary:hover {
-            background: #444;
-        }
-
-        /* Таблицы */
+        /* ───── Таблицы ───── */
         table {
             width: 100%;
             border-collapse: collapse;
-            font-size: 14px;
+            background: white;
+            border-radius: 12px;
+            overflow: hidden;
+            box-shadow: 0 2px 8px rgba(0,0,0,.05);
         }
-
         th, td {
+            padding: 12px 15px;
             text-align: left;
-            padding: 8px 12px;
+            font-size: 14px;
             border-bottom: 1px solid #eee;
         }
-
         th {
-            background: #f9f9f9;
+            background: #f8f9fa;
             font-weight: 600;
-            color: #333;
-            border-bottom: 1px solid #ccc;
-        }
-
-        tr:last-child td {
-            border-bottom: none;
-        }
-
-        code {
-            font-family: Consolas, Monaco, monospace;
-            font-size: 13px;
-            background: #f0f0f0;
-            padding: 1px 5px;
-            border-radius: 2px;
-        }
-
-        .status-in    { color: #2e7d32; }
-        .status-out   { color: #c25300; }
-
-        .muted { color: #888; }
-
-        /* Мини-статистика */
-        .summary {
-            display: flex;
-            gap: 24px;
-            font-size: 13px;
             color: #555;
-            margin-bottom: 20px;
-            flex-wrap: wrap;
+            text-transform: uppercase;
+            font-size: 12px;
+            letter-spacing: .5px;
         }
+        tr:last-child td { border-bottom: none; }
+        tr:hover td { background: #f9fafc; }
 
-        .summary b {
-            color: #222;
-            font-size: 15px;
+        .badge {
+            display: inline-block;
+            padding: 3px 10px;
+            border-radius: 12px;
+            font-size: 12px;
+            font-weight: 500;
         }
+        .badge-ok     { background: #d4edda; color: #155724; }
+        .badge-out    { background: #fff3cd; color: #856404; }
+        .badge-drying { background: #ffe0cc; color: #b8590a; }
 
-        .empty-row td {
+        .empty {
             text-align: center;
+            padding: 30px;
             color: #999;
-            padding: 20px;
             font-style: italic;
+        }
+
+        .refresh-hint {
+            font-size: 12px;
+            color: #999;
+            margin-left: 10px;
         }
     </style>
 </head>
 <body>
-<div class="wrap">
 
-    <header>
-        <h1>Прокат зонтов</h1>
-        <div class="sub">Учёт выдачи и возврата</div>
-    </header>
+    <!-- ═══════════ Плашка сушилки ═══════════ -->
+    <div id="dryer-box">💤 Сушилка: ожидание</div>
 
-    {# Сообщения #}
+    <h1>☂️ Umbria — учёт зонтов</h1>
+
+    <!-- ═══════════ Сообщения ═══════════ -->
     {% if messages %}
-        {% for m in messages %}
-            <div class="msg {{ m.tags }}">{{ m }}</div>
-        {% endfor %}
+        <div class="messages">
+            {% for m in messages %}
+                <div class="msg {{ m.tags }}">{{ m }}</div>
+            {% endfor %}
+        </div>
     {% endif %}
 
-    {# Сводка #}
-    <div class="summary">
-        <div>Всего зонтов: <b>{{ objects|length }}</b></div>
-        <div>На руках: <b>{{ active_handouts|length }}</b></div>
-        <div>Ячеек: <b>{{ cells|length }}</b></div>
-        <div>Пользователей: <b>{{ users|length }}</b></div>
-    </div>
+    <!-- ═══════════ Действия ═══════════ -->
+    <div class="cards">
 
-    {# Формы #}
-    <div class="forms">
-        <div class="panel">
-            <div class="panel-title">Выдать зонт</div>
-            <div class="panel-body">
-                <form method="post">
-                    {% csrf_token %}
-                    <input type="hidden" name="action" value="take">
-                    <label for="take-pass">Пропуск пользователя</label>
-                    <input type="text" id="take-pass" name="pass_tag" required autocomplete="off">
-                    <button type="submit">Выдать</button>
-                </form>
-            </div>
+        <!-- Выдать зонт -->
+        <div class="card">
+            <h3>📤 Выдать зонт</h3>
+            <form method="post">
+                {% csrf_token %}
+                <input type="hidden" name="action" value="take">
+                <label>
+                    IRF-метка зонта
+                    <input type="text" name="irf_tag" placeholder="Например: 04 AB CD EF" required>
+                </label>
+                <label>
+                    Карта клиента
+                    <select name="pass_tag" required>
+                        <option value="">— выберите —</option>
+                        {% for u in users %}
+                            <option value="{{ u.pass_tag }}">
+                                {{ u.full_name|default:"(без имени)" }} [{{ u.pass_tag }}]
+                            </option>
+                        {% endfor %}
+                    </select>
+                </label>
+                <button type="submit" class="btn-take">Выдать</button>
+            </form>
         </div>
 
-        <div class="panel">
-            <div class="panel-title">Принять зонт</div>
-            <div class="panel-body">
-                <form method="post">
-                    {% csrf_token %}
-                    <input type="hidden" name="action" value="return">
-                    <label for="return-pass">Пропуск пользователя</label>
-                    <input type="text" id="return-pass" name="pass_tag" required autocomplete="off">
-                    <button type="submit" class="secondary">Принять</button>
-                </form>
-            </div>
+        <!-- Вернуть зонт -->
+        <div class="card">
+            <h3>📥 Вернуть зонт</h3>
+            <form method="post">
+                {% csrf_token %}
+                <input type="hidden" name="action" value="return">
+                <label>
+                    IRF-метка зонта
+                    <input type="text" name="irf_tag" placeholder="Например: 04 AB CD EF" required>
+                </label>
+                <label>
+                    Ячейка (необязательно)
+                    <select name="cell_code">
+                        <option value="">— в домашнюю —</option>
+                        {% for c in cells %}
+                            <option value="{{ c.cell_code }}">
+                                {{ c.cell_code }} {% if c.zone %}({{ c.zone }}){% endif %}
+                            </option>
+                        {% endfor %}
+                    </select>
+                </label>
+                <button type="submit" class="btn-return">Вернуть</button>
+            </form>
         </div>
     </div>
 
-    <!-- ===== ТАБЛИЦА АКТИВНЫХ ВЫДАЧ ===== -->
-<div class="card mb-4">
-    <div class="card-header">
-        <strong>Сейчас на руках</strong>
-        <span class="text-muted small" id="last-update">обновлено только что</span>
-    </div>
-    <table class="table mb-0" id="handouts-table">
+    <!-- ═══════════ Активные выдачи ═══════════ -->
+    <h2>
+        🎒 Сейчас на руках
+        <span class="refresh-hint">(обновляется автоматически)</span>
+    </h2>
+
+    <table id="active-table">
         <thead>
             <tr>
                 <th>Зонт</th>
-                <th>Метка</th>
-                <th>Пользователь</th>
-                <th>Пропуск</th>
+                <th>IRF-метка</th>
+                <th>Клиент</th>
+                <th>Карта</th>
                 <th>Выдан</th>
             </tr>
         </thead>
-        <tbody id="handouts-body">
-            <!-- Начальное состояние рендерится с сервера -->
+        <tbody id="active-body">
             {% for h in active_handouts %}
                 <tr>
-                    <td>{{ h.object.name|default:"Объект" }}</td>
+                    <td>{{ h.object.name|default:"Зонт" }}</td>
                     <td><code>{{ h.object.irf_tag }}</code></td>
-                    <td>{{ h.user.full_name|default:"—" }}</td>
+                    <td>{{ h.user.full_name|default:"Без имени" }}</td>
                     <td><code>{{ h.user.pass_tag }}</code></td>
                     <td>{{ h.issued_at|date:"d.m.Y H:i:s" }}</td>
                 </tr>
             {% empty %}
-                <tr>
-                    <td colspan="5" class="text-center text-muted fst-italic">
-                        Нет активных выдач
-                    </td>
-                </tr>
+                <tr><td colspan="5" class="empty">Все зонты на месте 🌤</td></tr>
             {% endfor %}
         </tbody>
     </table>
-</div>
 
-<!-- ===== СКРИПТ АВТООБНОВЛЕНИЯ ===== -->
-<script>
-(function () {
-    const tbody = document.getElementById('handouts-body');
-    const lastUpdate = document.getElementById('last-update');
-    const API_URL = "{% url 'inventory:api_active' %}";
-    const REFRESH_MS = 2000;   // частота обновления (2 сек)
+    <!-- ═══════════ Все зонты ═══════════ -->
+    <h2>📋 Все зонты</h2>
 
-    function escapeHtml(str) {
-        return String(str ?? '')
-            .replace(/&/g, '&amp;')
-            .replace(/</g, '&lt;')
-            .replace(/>/g, '&gt;')
-            .replace(/"/g, '&quot;')
-            .replace(/'/g, '&#39;');
-    }
-
-    function render(handouts) {
-        if (!handouts.length) {
-            tbody.innerHTML = `
-                <tr>
-                    <td colspan="5" class="text-center text-muted fst-italic">
-                        Нет активных выдач
-                    </td>
-                </tr>`;
-            return;
-        }
-
-        tbody.innerHTML = handouts.map(h => `
+    <table>
+        <thead>
             <tr>
-                <td>${escapeHtml(h.object_name)}</td>
-                <td><code>${escapeHtml(h.object_tag)}</code></td>
-                <td>${escapeHtml(h.user_name)}</td>
-                <td><code>${escapeHtml(h.user_tag)}</code></td>
-                <td>${escapeHtml(h.issued_at)}</td>
-            </tr>`).join('');
-    }
-
-    async function refresh() {
-        try {
-            const response = await fetch(API_URL, { cache: 'no-store' });
-            if (!response.ok) return;
-            const data = await response.json();
-            render(data.handouts || []);
-            const now = new Date();
-            lastUpdate.textContent =
-                'обновлено в ' + now.toLocaleTimeString('ru-RU');
-        } catch (err) {
-            console.error('Ошибка обновления:', err);
-        }
-    }
-
-    // Запуск
-    setInterval(refresh, REFRESH_MS);
-})();
-</script>
-
-    {# Все зонты #}
-    <div class="panel">
-        <div class="panel-title">Зонты</div>
-        <table>
-            <thead>
+                <th>IRF-метка</th>
+                <th>Название</th>
+                <th>Ячейка</th>
+                <th>Домашняя</th>
+                <th>Статус</th>
+                <th>Влажность</th>
+                <th>Температура</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for o in objects %}
                 <tr>
-                    <th>Имя</th>
-                    <th>Метка</th>
-                    <th>Статус</th>
-                    <th>Ячейка</th>
+                    <td><code>{{ o.irf_tag }}</code></td>
+                    <td>{{ o.name|default:"—" }}</td>
+                    <td>{{ o.cell.cell_code|default:"—" }}</td>
+                    <td>{{ o.home_cell.cell_code|default:"—" }}</td>
+                    <td>
+                        {% if o.is_drying %}
+                            <span class="badge badge-drying">🌧 сушится</span>
+                        {% elif o.needs_drying %}
+                            <span class="badge badge-drying">⏳ в очереди</span>
+                        {% elif o.cell %}
+                            <span class="badge badge-ok">✓ на месте</span>
+                        {% else %}
+                            <span class="badge badge-out">на руках</span>
+                        {% endif %}
+                    </td>
+                    <td>{{ o.last_humidity|default:"—" }}{% if o.last_humidity %}%{% endif %}</td>
+                    <td>{{ o.last_temp|default:"—" }}{% if o.last_temp %}°C{% endif %}</td>
                 </tr>
-            </thead>
-            <tbody>
-                {% for o in objects %}
-                    <tr>
-                        <td>{{ o.name|default:"—" }}</td>
-                        <td><code>{{ o.irf_tag }}</code></td>
-                        <td>
-                            {% if o.is_on_hands %}
-                                <span class="status-out">на руках</span>
-                            {% else %}
-                                <span class="status-in">в ячейке</span>
-                            {% endif %}
-                        </td>
-                        <td>
-                            {% if o.cell %}
-                                <code>{{ o.cell.cell_code }}</code>
-                            {% else %}
-                                <span class="muted">—</span>
-                            {% endif %}
-                        </td>
-                    </tr>
-                {% empty %}
-                    <tr class="empty-row"><td colspan="4">Нет зонтов в системе</td></tr>
-                {% endfor %}
-            </tbody>
-        </table>
-    </div>
+            {% empty %}
+                <tr><td colspan="7" class="empty">Нет зарегистрированных зонтов</td></tr>
+            {% endfor %}
+        </tbody>
+    </table>
 
-</div>
+    <!-- ═══════════════════ СКРИПТЫ ═══════════════════ -->
+    <script>
+        // ───── Обновление статуса сушилки ─────
+        async function updateDryer() {
+            try {
+                const r = await fetch("/api/dryer/status/");
+                const d = await r.json();
+                const box = document.getElementById("dryer-box");
+
+                if (d.active) {
+                    box.classList.add("active");
+                    let text = "🌧 Сушит зонт";
+                    if (d.humidity != null) text += " | 💧 " + d.humidity + "%";
+                    if (d.temp != null)     text += " | 🌡 " + d.temp + "°C";
+                    if (d.updated)          text += " | " + d.updated;
+                    box.innerHTML = text;
+                } else {
+                    box.classList.remove("active");
+                    box.innerHTML = "💤 Сушилка: ожидание";
+                }
+            } catch (e) {
+                console.error("dryer status error:", e);
+            }
+        }
+
+        // ───── Обновление таблицы активных выдач ─────
+        async function updateActive() {
+            try {
+                const r = await fetch("/api/active/");
+                const d = await r.json();
+                const tbody = document.getElementById("active-body");
+
+                if (!d.handouts || d.handouts.length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="5" class="empty">Все зонты на месте 🌤</td></tr>';
+                    return;
+                }
+
+                tbody.innerHTML = d.handouts.map(h => `
+                    <tr>
+                        <td>${h.object_name}</td>
+                        <td><code>${h.object_tag}</code></td>
+                        <td>${h.user_name}</td>
+                        <td><code>${h.user_tag}</code></td>
+                        <td>${h.issued_at}</td>
+                    </tr>
+                `).join('');
+            } catch (e) {
+                console.error("active error:", e);
+            }
+        }
+
+        // ───── Таймеры ─────
+        updateDryer();
+        updateActive();
+        setInterval(updateDryer,  2000);   // сушилка — каждые 2 сек
+        setInterval(updateActive, 5000);   // выдачи  — каждые 5 сек
+    </script>
 </body>
 </html>

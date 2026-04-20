@@ -12,7 +12,7 @@ from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_POST, require_GET
 
-from .models import Cell, Handout, TrackedObject, UserTag
+from .models import Cell, Handout, TrackedObject, UserTag, DryerStatus
 
 
 # =====================================================================
@@ -113,102 +113,6 @@ def api_rent(request: HttpRequest) -> JsonResponse:
             "umbrella": umbrella.irf_tag,
             "message": "зонт выдан",
         })
-
-
-# =====================================================================
-#  API для сушилки (ESP8266: DHT11 + RC522 + ТЭН + кулер)
-# =====================================================================
-
-@csrf_exempt
-@require_POST
-def api_dryer(request: HttpRequest) -> JsonResponse:
-    expected_token = getattr(settings, "ARDUINO_TOKEN", None)
-    if expected_token and request.headers.get("X-Device-Token") != expected_token:
-        return JsonResponse({"ok": False, "message": "unauthorized"}, status=401)
-
-    try:
-        data = json.loads(request.body.decode("utf-8"))
-    except (json.JSONDecodeError, UnicodeDecodeError):
-        return JsonResponse({"ok": False, "message": "invalid json"}, status=400)
-
-    event    = (data.get("event") or "").strip()
-    uid      = (data.get("uid") or "").strip()
-    temp     = data.get("temp")
-    humidity = data.get("humidity")
-
-    # ─────── CHECK — есть ли зонт на сушку? ───────
-    if event == "check":
-        obj = (
-            TrackedObject.objects
-            .filter(needs_drying=True, is_drying=False)
-            .order_by("irf_tag")
-            .first()
-        )
-        if obj:
-            print(f"[api_dryer] → задание на сушку: {obj.irf_tag}")
-            return JsonResponse({
-                "ok": True,
-                "action": "dry",
-                "umbrella": obj.irf_tag,
-                "name": obj.name or "",
-            })
-        return JsonResponse({"ok": True, "action": "idle"})
-
-    # ─────── START ───────
-    if event == "start":
-        if not uid:
-            return JsonResponse({"ok": False, "message": "uid required"}, status=400)
-        try:
-            obj = TrackedObject.objects.get(irf_tag=uid)
-        except TrackedObject.DoesNotExist:
-            return JsonResponse({"ok": False, "message": "umbrella not found"}, status=404)
-
-        obj.is_drying = True
-        if humidity is not None: obj.last_humidity = float(humidity)
-        if temp is not None:     obj.last_temp = float(temp)
-        obj.save(update_fields=["is_drying", "last_humidity", "last_temp"])
-        print(f"[api_dryer] СТАРТ сушки: {uid} (H={humidity}% T={temp}°C)")
-        return JsonResponse({"ok": True, "message": "drying started"})
-
-    # ─────── FINISHED ───────
-    if event == "finished":
-        if not uid:
-            return JsonResponse({"ok": False, "message": "uid required"}, status=400)
-        try:
-            obj = TrackedObject.objects.get(irf_tag=uid)
-        except TrackedObject.DoesNotExist:
-            return JsonResponse({"ok": False, "message": "umbrella not found"}, status=404)
-
-        obj.needs_drying  = False
-        obj.is_drying     = False
-        obj.last_dried_at = timezone.now()
-        if humidity is not None: obj.last_humidity = float(humidity)
-        if temp is not None:     obj.last_temp = float(temp)
-        obj.save(update_fields=["needs_drying", "is_drying", "last_dried_at", "last_humidity", "last_temp"])
-        print(f"[api_dryer] ВЫСОХ: {uid}")
-        return JsonResponse({"ok": True, "message": "ok"})
-
-    # ─────── FAILED ───────
-    if event == "failed":
-        if uid:
-            try:
-                obj = TrackedObject.objects.get(irf_tag=uid)
-                obj.is_drying = False
-                obj.save(update_fields=["is_drying"])
-            except TrackedObject.DoesNotExist:
-                pass
-        print(f"[api_dryer] ❌ СБОЙ: {uid}")
-        return JsonResponse({"ok": True})
-
-    # ─────── STATUS ───────
-    if event == "status":
-        state  = data.get("state", "?")
-        heater = data.get("heater", "?")
-        fan    = data.get("fan", "?")
-        print(f"[api_dryer] status: state={state} T={temp}°C H={humidity}% heater={heater} fan={fan}")
-        return JsonResponse({"ok": True})
-
-    return JsonResponse({"ok": False, "message": f"unknown event: {event}"}, status=400)
 
 
 # =====================================================================
@@ -343,31 +247,75 @@ def api_active_handouts(request: HttpRequest) -> JsonResponse:
 
     return JsonResponse({"handouts": data})
 
+
+# =====================================================================
+#  "ТУПОЙ" ЛОВЕЦ ЗАПРОСОВ ОТ ESP СУШИЛКИ
+#  Принимает ЛЮБОЙ запрос, считает что "сушилка работает",
+#  парсит humidity/temp если есть.
+# =====================================================================
+
 @csrf_exempt
-@require_POST
-def api_humidity(request):
-    """Просто принимает данные от датчика влажности."""
+def api_dryer_ping(request: HttpRequest, path: str = "") -> JsonResponse:
+    status = DryerStatus.get()
+    status.is_active = True
+
+    raw = ""
     try:
-        data = json.loads(request.body.decode("utf-8"))
+        raw = request.body.decode("utf-8", errors="replace")[:500]
     except Exception:
-        return JsonResponse({"ok": False, "message": "bad json"}, status=400)
+        raw = ""
+    status.last_raw = raw
 
-    humidity = data.get("humidity")
-    temp     = data.get("temp")
-    uid      = data.get("uid", "")
+    # Пытаемся распарсить JSON (если ESP его шлёт)
+    try:
+        data = json.loads(raw) if raw else {}
+        if isinstance(data, dict):
+            if "humidity" in data:
+                try: status.last_humidity = float(data["humidity"])
+                except (ValueError, TypeError): pass
+            if "temp" in data:
+                try: status.last_temp = float(data["temp"])
+                except (ValueError, TypeError): pass
+    except Exception:
+        # не JSON — пытаемся найти числа в теле ("humidity=85&temp=23" и т.п.)
+        import re
+        m_h = re.search(r"humidity[=:]\s*([\d.]+)", raw)
+        m_t = re.search(r"temp[=:]\s*([\d.]+)", raw)
+        if m_h:
+            try: status.last_humidity = float(m_h.group(1))
+            except ValueError: pass
+        if m_t:
+            try: status.last_temp = float(m_t.group(1))
+            except ValueError: pass
 
-    print(f"📊 Датчик: H={humidity}% T={temp}°C uid={uid}")
+    status.save()
 
-    # Если нужно — сохраняем в БД:
-    if uid:
-        try:
-            obj = TrackedObject.objects.get(irf_tag=uid)
-            if humidity is not None:
-                obj.last_humidity = float(humidity)
-            if temp is not None:
-                obj.last_temp = float(temp)
-            obj.save(update_fields=["last_humidity", "last_temp"])
-        except TrackedObject.DoesNotExist:
-            pass
+    print(f"🌧 DRYER PING: {request.method} /{path}  body={raw[:120]!r}")
+    return JsonResponse({"ok": True, "message": "caught"}, status=200)
 
-    return JsonResponse({"ok": True})
+
+# =====================================================================
+#  API: статус сушилки (для авто-обновления на сайте)
+# =====================================================================
+
+@require_GET
+def api_dryer_status(request: HttpRequest) -> JsonResponse:
+    s = DryerStatus.get()
+
+    # если последнее обновление было давно (>30 сек) — сушка закончилась
+    idle_after_sec = 30
+    is_active = s.is_active
+    if s.last_update:
+        delta = (timezone.now() - s.last_update).total_seconds()
+        if delta > idle_after_sec:
+            is_active = False
+            if s.is_active:
+                s.is_active = False
+                s.save(update_fields=["is_active"])
+
+    return JsonResponse({
+        "active":   is_active,
+        "humidity": s.last_humidity,
+        "temp":     s.last_temp,
+        "updated":  timezone.localtime(s.last_update).strftime("%H:%M:%S") if s.last_update else None,
+    })

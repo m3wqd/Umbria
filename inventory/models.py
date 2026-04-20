@@ -48,7 +48,7 @@ class TrackedObject(models.Model):
         on_delete=models.SET_NULL,
         null=True,
         blank=True,
-        related_name="current_objects",   # ← ИСПРАВЛЕНО (было "objects")
+        related_name="current_objects",
         verbose_name="Текущая ячейка",
         help_text="Где зонт сейчас. NULL — на руках у клиента.",
     )
@@ -175,3 +175,26 @@ class Handout(models.Model):
     def __str__(self):
         status = "активна" if self.returned_at is None else "закрыта"
         return f"{self.object.irf_tag} → {self.user.pass_tag} ({status})"
+
+
+# ═════════════════════════════════════════════════════════════
+#  Статус сушилки (singleton — одна запись на всю систему)
+# ═════════════════════════════════════════════════════════════
+class DryerStatus(models.Model):
+    is_active     = models.BooleanField(default=False, verbose_name="Сушит прямо сейчас")
+    last_humidity = models.FloatField(null=True, blank=True, verbose_name="Последняя влажность, %")
+    last_temp     = models.FloatField(null=True, blank=True, verbose_name="Последняя температура, °C")
+    last_update   = models.DateTimeField(auto_now=True, verbose_name="Последнее обновление")
+    last_raw      = models.TextField(blank=True, default="", verbose_name="Сырой ответ от ESP")
+
+    class Meta:
+        verbose_name = "Статус сушилки"
+        verbose_name_plural = "Статус сушилки"
+
+    def __str__(self):
+        return "🔥 Сушит" if self.is_active else "💤 Простой"
+
+    @classmethod
+    def get(cls):
+        obj, _ = cls.objects.get_or_create(pk=1)
+        return obj
