@@ -14,18 +14,9 @@
             color: #2c3e50;
             padding: 20px;
         }
-        h1 {
-            margin: 0 0 20px;
-            font-size: 28px;
-            color: #34495e;
-        }
-        h2 {
-            margin: 30px 0 12px;
-            font-size: 20px;
-            color: #34495e;
-        }
+        h1 { margin: 0 0 20px; font-size: 28px; color: #34495e; }
+        h2 { margin: 30px 0 12px; font-size: 20px; color: #34495e; }
 
-        /* ───── Плашка сушилки (fixed, в углу) ───── */
         #dryer-box {
             position: fixed;
             top: 15px;
@@ -51,10 +42,7 @@
             50%      { transform: scale(1.04); }
         }
 
-        /* ───── Сообщения ───── */
-        .messages {
-            margin-bottom: 20px;
-        }
+        .messages { margin-bottom: 20px; }
         .msg {
             padding: 10px 15px;
             border-radius: 8px;
@@ -65,7 +53,6 @@
         .msg.error   { background: #f8d7da; color: #721c24; }
         .msg.info    { background: #d1ecf1; color: #0c5460; }
 
-        /* ───── Карточки действий ───── */
         .cards {
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
@@ -78,17 +65,8 @@
             border-radius: 12px;
             box-shadow: 0 2px 8px rgba(0,0,0,.05);
         }
-        .card h3 {
-            margin: 0 0 15px;
-            font-size: 17px;
-            color: #2c3e50;
-        }
-        .card label {
-            display: block;
-            margin-bottom: 12px;
-            font-size: 13px;
-            color: #666;
-        }
+        .card h3 { margin: 0 0 15px; font-size: 17px; color: #2c3e50; }
+        .card label { display: block; margin-bottom: 12px; font-size: 13px; color: #666; }
         .card input, .card select {
             width: 100%;
             padding: 8px 10px;
@@ -112,7 +90,6 @@
         .btn-return { background: #2ecc71; color: white; }
         .btn-return:hover { background: #27ae60; }
 
-        /* ───── Таблицы ───── */
         table {
             width: 100%;
             border-collapse: collapse;
@@ -155,22 +132,31 @@
             color: #999;
             font-style: italic;
         }
-
         .refresh-hint {
             font-size: 12px;
             color: #999;
             margin-left: 10px;
         }
+
+        .btn-done {
+            margin-left: 8px;
+            padding: 3px 10px;
+            font-size: 12px;
+            border: none;
+            border-radius: 6px;
+            background: #27ae60;
+            color: white;
+            cursor: pointer;
+        }
+        .btn-done:hover { background: #219150; }
     </style>
 </head>
 <body>
 
-    <!-- ═══════════ Плашка сушилки ═══════════ -->
     <div id="dryer-box">💤 Сушилка: ожидание</div>
 
-    <h1>Umbria - учёт зонтов</h1>
+    <h1>☂️ Umbria — учёт зонтов</h1>
 
-    <!-- ═══════════ Сообщения ═══════════ -->
     {% if messages %}
         <div class="messages">
             {% for m in messages %}
@@ -179,18 +165,15 @@
         </div>
     {% endif %}
 
-    <!-- ═══════════ Действия ═══════════ -->
     <div class="cards">
-
-        <!-- Выдать зонт -->
         <div class="card">
-            <h3> Выдать зонт</h3>
+            <h3>📤 Выдать зонт (вручную)</h3>
             <form method="post">
                 {% csrf_token %}
                 <input type="hidden" name="action" value="take">
                 <label>
                     IRF-метка зонта
-                    <input type="text" name="irf_tag" placeholder="Например: 04 AB CD EF" required>
+                    <input type="text" name="irf_tag" placeholder="Например: 09 FE 0C B4" required>
                 </label>
                 <label>
                     Карта клиента
@@ -207,15 +190,14 @@
             </form>
         </div>
 
-        <!-- Вернуть зонт -->
         <div class="card">
-            <h3>Вернуть зонт</h3>
+            <h3>📥 Вернуть зонт (вручную)</h3>
             <form method="post">
                 {% csrf_token %}
                 <input type="hidden" name="action" value="return">
                 <label>
                     IRF-метка зонта
-                    <input type="text" name="irf_tag" placeholder="Например: 04 AB CD EF" required>
+                    <input type="text" name="irf_tag" placeholder="Например: 09 FE 0C B4" required>
                 </label>
                 <label>
                     Ячейка (необязательно)
@@ -233,13 +215,8 @@
         </div>
     </div>
 
-    <!-- ═══════════ Активные выдачи ═══════════ -->
-    <h2>
-         Сейчас на руках
-        <span class="refresh-hint">(обновляется автоматически)</span>
-    </h2>
-
-    <table id="active-table">
+    <h2>🎒 Сейчас на руках <span class="refresh-hint">(обновляется автоматически)</span></h2>
+    <table>
         <thead>
             <tr>
                 <th>Зонт</th>
@@ -264,9 +241,7 @@
         </tbody>
     </table>
 
-    <!-- ═══════════ Все зонты ═══════════ -->
-    <h2> Все зонты</h2>
-
+    <h2>📋 Все зонты <span class="refresh-hint">(обновляется автоматически)</span></h2>
     <table>
         <thead>
             <tr>
@@ -279,7 +254,7 @@
                 <th>Температура</th>
             </tr>
         </thead>
-        <tbody>
+        <tbody id="objects-body">
             {% for o in objects %}
                 <tr>
                     <td><code>{{ o.irf_tag }}</code></td>
@@ -306,9 +281,13 @@
         </tbody>
     </table>
 
-    <!-- ═══════════════════ СКРИПТЫ ═══════════════════ -->
     <script>
-        // ───── Обновление статуса сушилки ─────
+        function esc(s) {
+            return String(s ?? "")
+                .replaceAll("&","&amp;").replaceAll("<","&lt;")
+                .replaceAll(">","&gt;").replaceAll('"',"&quot;");
+        }
+
         async function updateDryer() {
             try {
                 const r = await fetch("/api/dryer/status/");
@@ -317,51 +296,100 @@
 
                 if (d.active) {
                     box.classList.add("active");
-                    let text = "🌧 Сушит зонт";
-                    if (d.humidity != null) text += " | 💧 " + d.humidity + "%";
-                    if (d.temp != null)     text += " | 🌡 " + d.temp + "°C";
-                    if (d.updated)          text += " | " + d.updated;
-                    box.innerHTML = text;
+                    let title = "🌧 Сушит зонт";
+                    if (d.umbrella && d.umbrella.uid) {
+                        title = "🌧 Сушит: " + esc(d.umbrella.name || "Зонт")
+                              + " <small style='opacity:.8'>[" + esc(d.umbrella.uid) + "]</small>";
+                    }
+                    let stats = "";
+                    if (d.humidity != null) stats += " 💧 " + d.humidity + "%";
+                    if (d.temp != null)     stats += " 🌡 " + d.temp + "°C";
+                    if (d.updated)          stats += " ⏱ " + d.updated;
+                    box.innerHTML = title + (stats ? "<br><small>" + stats + "</small>" : "");
                 } else {
                     box.classList.remove("active");
                     box.innerHTML = "💤 Сушилка: ожидание";
                 }
-            } catch (e) {
-                console.error("dryer status error:", e);
-            }
+            } catch(e) { console.error("dryer:", e); }
         }
 
-        // ───── Обновление таблицы активных выдач ─────
         async function updateActive() {
             try {
                 const r = await fetch("/api/active/");
                 const d = await r.json();
                 const tbody = document.getElementById("active-body");
-
                 if (!d.handouts || d.handouts.length === 0) {
                     tbody.innerHTML = '<tr><td colspan="5" class="empty">Все зонты на месте 🌤</td></tr>';
                     return;
                 }
-
                 tbody.innerHTML = d.handouts.map(h => `
                     <tr>
-                        <td>${h.object_name}</td>
-                        <td><code>${h.object_tag}</code></td>
-                        <td>${h.user_name}</td>
-                        <td><code>${h.user_tag}</code></td>
-                        <td>${h.issued_at}</td>
+                        <td>${esc(h.object_name)}</td>
+                        <td><code>${esc(h.object_tag)}</code></td>
+                        <td>${esc(h.user_name)}</td>
+                        <td><code>${esc(h.user_tag)}</code></td>
+                        <td>${esc(h.issued_at)}</td>
                     </tr>
-                `).join('');
-            } catch (e) {
-                console.error("active error:", e);
-            }
+                `).join("");
+            } catch(e) { console.error("active:", e); }
         }
 
-        // ───── Таймеры ─────
+        async function updateObjects() {
+            try {
+                const r = await fetch("/api/objects/");
+                const d = await r.json();
+                const tbody = document.getElementById("objects-body");
+                if (!d.objects || d.objects.length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="7" class="empty">Нет зарегистрированных зонтов</td></tr>';
+                    return;
+                }
+
+                tbody.innerHTML = d.objects.map(o => {
+                    let badgeClass = "badge-ok";
+                    if (o.status_code === "drying" || o.status_code === "queue") badgeClass = "badge-drying";
+                    else if (o.status_code === "out") badgeClass = "badge-out";
+
+                    const humidity = (o.humidity == null) ? "—" : (o.humidity + "%");
+                    const temp     = (o.temp     == null) ? "—" : (o.temp + "°C");
+
+                    const doneBtn = (o.status_code === "drying" || o.status_code === "queue")
+                        ? `<button class="btn-done" onclick="finishDrying('${esc(o.irf_tag)}')">✓ готов</button>`
+                        : "";
+
+                    return `
+                        <tr>
+                            <td><code>${esc(o.irf_tag)}</code></td>
+                            <td>${esc(o.name) || "—"}</td>
+                            <td>${esc(o.cell) || "—"}</td>
+                            <td>${esc(o.home_cell) || "—"}</td>
+                            <td><span class="badge ${badgeClass}">${esc(o.status_label)}</span>${doneBtn}</td>
+                            <td>${humidity}</td>
+                            <td>${temp}</td>
+                        </tr>
+                    `;
+                }).join("");
+            } catch(e) { console.error("objects:", e); }
+        }
+
+        async function finishDrying(uid) {
+            if (!confirm("Завершить сушку зонта " + uid + "?")) return;
+            try {
+                await fetch("/api/dryer/done/", {
+                    method: "POST",
+                    headers: {"Content-Type": "application/json"},
+                    body: JSON.stringify({uid: uid}),
+                });
+                updateObjects();
+            } catch(e) { alert("Ошибка: " + e); }
+        }
+
         updateDryer();
         updateActive();
-        setInterval(updateDryer,  2000);   // сушилка — каждые 2 сек
-        setInterval(updateActive, 5000);   // выдачи  — каждые 5 сек
+        updateObjects();
+
+        setInterval(updateDryer,   2000);
+        setInterval(updateActive,  3000);
+        setInterval(updateObjects, 2000);
     </script>
 </body>
 </html>

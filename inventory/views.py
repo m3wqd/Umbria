@@ -17,7 +17,13 @@ from .models import Cell, Handout, TrackedObject, UserTag, DryerStatus
 
 
 # =====================================================================
-#  API для Arduino выдачи (RFID-карта клиента → выдать/вернуть зонт)
+#  API для Arduino выдачи
+#  Arduino шлёт ВСЁ в одном запросе:
+#    {
+#      "card": "UID карты",
+#      "box_has_umbrella": true/false,   ← датчик / RFID внутри бокса
+#      "umbrella_uid": "UID зонта"       ← опционально
+#    }
 # =====================================================================
 
 @csrf_exempt
@@ -32,28 +38,30 @@ def api_rent(request: HttpRequest) -> JsonResponse:
     except (json.JSONDecodeError, UnicodeDecodeError):
         return JsonResponse({"action": "error", "message": "invalid json"}, status=400)
 
-    uid = (data.get("uid") or "").strip()
-    if not uid:
-        return JsonResponse({"action": "error", "message": "uid required"}, status=400)
+    card_uid = (data.get("card") or data.get("uid") or "").strip()
+    box_has  = bool(data.get("box_has_umbrella", False))
+    umbr_uid = (data.get("umbrella_uid") or "").strip()
 
-    print(f"[api_rent] UID получен: {uid!r}")
+    if not card_uid:
+        return JsonResponse({"action": "error", "message": "card uid required"}, status=400)
+
+    print(f"[api_rent] card={card_uid!r}  box={box_has}  umbrella={umbr_uid!r}")
 
     try:
-        user = UserTag.objects.get(pass_tag=uid)
+        user = UserTag.objects.get(pass_tag=card_uid)
     except UserTag.DoesNotExist:
-        print(f"[api_rent] Карта не зарегистрирована: {uid!r}")
+        print("  ❌ карта не зарегистрирована")
         return JsonResponse({"action": "error", "message": "card not registered"}, status=404)
 
     with transaction.atomic():
         active = (
             Handout.objects.select_for_update()
             .filter(user=user, returned_at__isnull=True)
-            .select_related("object", "object__home_cell")
-            .first()
+            .select_related("object").first()
         )
 
-        # ─────── ВОЗВРАТ ───────
-        if active:
+        # ─── ВОЗВРАТ: у клиента зонт + в боксе появился зонт ───
+        if active and box_has:
             obj = active.object
             active.returned_at = timezone.now()
             active.save(update_fields=["returned_at"])
@@ -63,49 +71,68 @@ def api_rent(request: HttpRequest) -> JsonResponse:
                 obj.cell = obj.home_cell
             obj.save(update_fields=["cell", "needs_drying"])
 
-            print(f"[api_rent] ВОЗВРАТ зонта {obj.irf_tag}")
+            print(f"  ✅ ВОЗВРАТ {obj.irf_tag} → сушка")
             return JsonResponse({
                 "action": "return",
                 "umbrella": obj.irf_tag,
                 "message": "возврат принят, зонт отправлен на сушку",
-                "needs_drying": True,
             })
 
-        # ─────── ВЫДАЧА ───────
-        open_handouts = Handout.objects.filter(
-            object=OuterRef('pk'),
-            returned_at__isnull=True,
-        )
+        # ─── Клиент с зонтом, бокс пустой → ждём ───
+        if active and not box_has:
+            print(f"  ⏳ ждём, пока положат зонт {active.object.irf_tag}")
+            return JsonResponse({
+                "action": "wait_return",
+                "umbrella": active.object.irf_tag,
+                "message": "положите зонт в бокс",
+            })
 
-        umbrella = (
-            TrackedObject.objects
-            .filter(cell__isnull=False)
-            .annotate(has_open_handout=Exists(open_handouts))
-            .filter(has_open_handout=False)
-            .order_by("irf_tag")
-            .first()
-        )
+        # ─── ВЫДАЧА: у клиента нет зонта + в боксе есть зонт ───
+        if not active and box_has:
+            umbrella = None
+            if umbr_uid:
+                try:
+                    umbrella = TrackedObject.objects.get(irf_tag=umbr_uid)
+                except TrackedObject.DoesNotExist:
+                    print(f"  ⚠ UID {umbr_uid!r} не найден — ищем свободный")
 
-        if not umbrella:
-            return JsonResponse({"action": "error", "message": "нет свободных зонтов"}, status=409)
+            if not umbrella:
+                open_h = Handout.objects.filter(object=OuterRef('pk'), returned_at__isnull=True)
+                umbrella = (
+                    TrackedObject.objects
+                    .filter(cell__isnull=False)
+                    .annotate(has_open=Exists(open_h))
+                    .filter(has_open=False)
+                    .order_by("irf_tag").first()
+                )
 
-        if not umbrella.home_cell_id:
-            umbrella.home_cell = umbrella.cell
-        umbrella.cell = None
-        umbrella.save(update_fields=["cell", "home_cell"])
+            if not umbrella:
+                return JsonResponse({"action": "error", "message": "нет свободных зонтов"}, status=409)
 
-        Handout.objects.create(object=umbrella, user=user, issued_at=timezone.now())
+            if not umbrella.home_cell_id and umbrella.cell_id:
+                umbrella.home_cell = umbrella.cell
+            umbrella.cell = None
+            umbrella.save(update_fields=["cell", "home_cell"])
 
-        print(f"[api_rent] ВЫДАН зонт {umbrella.irf_tag}")
+            Handout.objects.create(object=umbrella, user=user, issued_at=timezone.now())
+
+            print(f"  ✅ ВЫДАН {umbrella.irf_tag} клиенту {user.pass_tag}")
+            return JsonResponse({
+                "action": "take",
+                "umbrella": umbrella.irf_tag,
+                "message": "зонт выдан",
+            })
+
+        # ─── Клиент без зонта, бокс пустой ───
+        print("  ⚠ в боксе нет зонта")
         return JsonResponse({
-            "action": "take",
-            "umbrella": umbrella.irf_tag,
-            "message": "зонт выдан",
+            "action": "empty",
+            "message": "в боксе нет зонта",
         })
 
 
 # =====================================================================
-#  Веб-интерфейс (главная страница)
+#  Веб-интерфейс
 # =====================================================================
 
 def index(request: HttpRequest) -> HttpResponse:
@@ -116,22 +143,22 @@ def index(request: HttpRequest) -> HttpResponse:
 
         if action == "take":
             if not irf_tag or not pass_tag:
-                messages.error(request, "Укажите IRF-метку объекта и метку пользователя.")
+                messages.error(request, "Укажите IRF-метку зонта и карту клиента.")
                 return redirect("inventory:index")
             try:
                 obj = TrackedObject.objects.get(irf_tag=irf_tag)
             except TrackedObject.DoesNotExist:
-                messages.error(request, f"Объект '{irf_tag}' не найден.")
+                messages.error(request, f"Зонт '{irf_tag}' не найден.")
                 return redirect("inventory:index")
             try:
                 user = UserTag.objects.get(pass_tag=pass_tag)
             except UserTag.DoesNotExist:
-                messages.error(request, f"Пользователь '{pass_tag}' не найден.")
+                messages.error(request, f"Карта '{pass_tag}' не найдена.")
                 return redirect("inventory:index")
 
             with transaction.atomic():
                 if Handout.objects.filter(object=obj, returned_at__isnull=True).exists():
-                    messages.error(request, "Этот объект уже на руках.")
+                    messages.error(request, "Этот зонт уже на руках.")
                     return redirect("inventory:index")
                 if not obj.home_cell_id and obj.cell_id:
                     obj.home_cell = obj.cell
@@ -139,18 +166,18 @@ def index(request: HttpRequest) -> HttpResponse:
                 obj.save(update_fields=["cell", "home_cell"])
                 Handout.objects.create(object=obj, user=user, issued_at=timezone.now())
 
-            messages.success(request, "Объект выдан.")
+            messages.success(request, "Зонт выдан.")
             return redirect("inventory:index")
 
         if action == "return":
             if not irf_tag:
-                messages.error(request, "Укажите IRF-метку объекта.")
+                messages.error(request, "Укажите IRF-метку зонта.")
                 return redirect("inventory:index")
             cell_code = (request.POST.get("cell_code") or "").strip()
             try:
                 obj = TrackedObject.objects.get(irf_tag=irf_tag)
             except TrackedObject.DoesNotExist:
-                messages.error(request, f"Объект '{irf_tag}' не найден.")
+                messages.error(request, f"Зонт '{irf_tag}' не найден.")
                 return redirect("inventory:index")
 
             with transaction.atomic():
@@ -160,7 +187,7 @@ def index(request: HttpRequest) -> HttpResponse:
                     .order_by("-issued_at").first()
                 )
                 if not active:
-                    messages.error(request, "Активной выдачи для этого объекта нет.")
+                    messages.error(request, "Активной выдачи для этого зонта нет.")
                     return redirect("inventory:index")
 
                 active.returned_at = timezone.now()
@@ -179,7 +206,7 @@ def index(request: HttpRequest) -> HttpResponse:
                 obj.needs_drying = True
                 obj.save(update_fields=["cell", "needs_drying"])
 
-            messages.success(request, "Объект возвращён и отправлен на сушку.")
+            messages.success(request, "Зонт возвращён и отправлен на сушку.")
             return redirect("inventory:index")
 
         messages.error(request, "Неизвестное действие.")
@@ -226,13 +253,12 @@ def api_active_handouts(request: HttpRequest) -> JsonResponse:
 
 
 # =====================================================================
-#  API: список всех зонтов (для авто-обновления таблицы "Все зонты")
+#  API: список всех зонтов
 # =====================================================================
 
 @require_GET
 def api_objects(request: HttpRequest) -> JsonResponse:
     objects = TrackedObject.objects.select_related("cell", "home_cell").order_by("irf_tag")
-
     data = []
     for o in objects:
         if o.is_drying:
@@ -254,12 +280,11 @@ def api_objects(request: HttpRequest) -> JsonResponse:
             "humidity":     o.last_humidity,
             "temp":         o.last_temp,
         })
-
     return JsonResponse({"objects": data})
 
 
 # =====================================================================
-#  ЛОВЕЦ любого запроса от ESP сушилки
+#  ЛОВЕЦ ЗАПРОСОВ ОТ ESP СУШИЛКИ
 # =====================================================================
 
 @csrf_exempt
@@ -275,7 +300,6 @@ def api_dryer_ping(request: HttpRequest, path: str = "") -> JsonResponse:
 
     humidity, temp, uid, event = None, None, "", ""
 
-    # JSON
     parsed = False
     try:
         data = json.loads(raw) if raw else {}
@@ -292,7 +316,6 @@ def api_dryer_ping(request: HttpRequest, path: str = "") -> JsonResponse:
     except Exception:
         parsed = False
 
-    # Regex — если не JSON
     if not parsed:
         m_h = re.search(r"humidity[=:]\s*([\d.]+)", raw)
         m_t = re.search(r"temp[=:]\s*([\d.]+)",     raw)
@@ -308,7 +331,6 @@ def api_dryer_ping(request: HttpRequest, path: str = "") -> JsonResponse:
     if humidity is not None: status.last_humidity = humidity
     if temp     is not None: status.last_temp     = temp
 
-    # Если пришёл UID зонта — обновляем его
     if uid:
         try:
             obj = TrackedObject.objects.get(irf_tag=uid)
@@ -366,3 +388,31 @@ def api_dryer_status(request: HttpRequest) -> JsonResponse:
             "name": (current.name if current else "") or "",
         } if current else None,
     })
+
+
+# =====================================================================
+#  API: ручное завершение сушки (кнопка на сайте)
+# =====================================================================
+
+@csrf_exempt
+@require_POST
+def api_dryer_done(request: HttpRequest) -> JsonResponse:
+    try:
+        data = json.loads(request.body.decode("utf-8"))
+    except Exception:
+        data = {}
+    uid = (data.get("uid") or "").strip()
+    if not uid:
+        return JsonResponse({"ok": False, "message": "uid required"}, status=400)
+    try:
+        obj = TrackedObject.objects.get(irf_tag=uid)
+    except TrackedObject.DoesNotExist:
+        return JsonResponse({"ok": False, "message": "not found"}, status=404)
+
+    obj.is_drying     = False
+    obj.needs_drying  = False
+    obj.last_dried_at = timezone.now()
+    obj.save(update_fields=["is_drying", "needs_drying", "last_dried_at"])
+
+    print(f"  ✓ ручное завершение сушки: {uid}")
+    return JsonResponse({"ok": True})
