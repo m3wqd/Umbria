@@ -342,3 +342,32 @@ def api_active_handouts(request: HttpRequest) -> JsonResponse:
     ]
 
     return JsonResponse({"handouts": data})
+
+@csrf_exempt
+@require_POST
+def api_humidity(request):
+    """Просто принимает данные от датчика влажности."""
+    try:
+        data = json.loads(request.body.decode("utf-8"))
+    except Exception:
+        return JsonResponse({"ok": False, "message": "bad json"}, status=400)
+
+    humidity = data.get("humidity")
+    temp     = data.get("temp")
+    uid      = data.get("uid", "")
+
+    print(f"📊 Датчик: H={humidity}% T={temp}°C uid={uid}")
+
+    # Если нужно — сохраняем в БД:
+    if uid:
+        try:
+            obj = TrackedObject.objects.get(irf_tag=uid)
+            if humidity is not None:
+                obj.last_humidity = float(humidity)
+            if temp is not None:
+                obj.last_temp = float(temp)
+            obj.save(update_fields=["last_humidity", "last_temp"])
+        except TrackedObject.DoesNotExist:
+            pass
+
+    return JsonResponse({"ok": True})

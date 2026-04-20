@@ -8,4 +8,5 @@ urlpatterns = [
     path("api/rent/",     views.api_rent,             name="api_rent"),
     path("api/dryer/",    views.api_dryer,            name="api_dryer"),    # ← НОВЫЙ
     path("api/active/",   views.api_active_handouts,  name="api_active"),
+    path("api/humidity/", views.api_humidity, name="api_humidity"),
 ]
