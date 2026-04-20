@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 
 from django.conf import settings
 from django.contrib import messages
@@ -16,7 +17,7 @@ from .models import Cell, Handout, TrackedObject, UserTag, DryerStatus
 
 
 # =====================================================================
-#  API для Arduino выдачи (RFID карта клиента → выдать/вернуть зонт)
+#  API для Arduino выдачи (RFID-карта клиента → выдать/вернуть зонт)
 # =====================================================================
 
 @csrf_exempt
@@ -43,8 +44,6 @@ def api_rent(request: HttpRequest) -> JsonResponse:
         print(f"[api_rent] Карта не зарегистрирована: {uid!r}")
         return JsonResponse({"action": "error", "message": "card not registered"}, status=404)
 
-    print(f"[api_rent] Клиент: {user.full_name or '(без имени)'} [{user.pass_tag}]")
-
     with transaction.atomic():
         active = (
             Handout.objects.select_for_update()
@@ -56,17 +55,15 @@ def api_rent(request: HttpRequest) -> JsonResponse:
         # ─────── ВОЗВРАТ ───────
         if active:
             obj = active.object
-            print(f"[api_rent] ВОЗВРАТ зонта {obj.irf_tag}")
-
             active.returned_at = timezone.now()
             active.save(update_fields=["returned_at"])
 
-            # ставим зонт в очередь на сушку
             obj.needs_drying = True
             if obj.home_cell_id:
                 obj.cell = obj.home_cell
             obj.save(update_fields=["cell", "needs_drying"])
 
+            print(f"[api_rent] ВОЗВРАТ зонта {obj.irf_tag}")
             return JsonResponse({
                 "action": "return",
                 "umbrella": obj.irf_tag,
@@ -90,22 +87,14 @@ def api_rent(request: HttpRequest) -> JsonResponse:
         )
 
         if not umbrella:
-            return JsonResponse(
-                {"action": "error", "message": "нет свободных зонтов"},
-                status=409,
-            )
+            return JsonResponse({"action": "error", "message": "нет свободных зонтов"}, status=409)
 
         if not umbrella.home_cell_id:
             umbrella.home_cell = umbrella.cell
-
         umbrella.cell = None
         umbrella.save(update_fields=["cell", "home_cell"])
 
-        Handout.objects.create(
-            object=umbrella,
-            user=user,
-            issued_at=timezone.now(),
-        )
+        Handout.objects.create(object=umbrella, user=user, issued_at=timezone.now())
 
         print(f"[api_rent] ВЫДАН зонт {umbrella.irf_tag}")
         return JsonResponse({
@@ -129,13 +118,11 @@ def index(request: HttpRequest) -> HttpResponse:
             if not irf_tag or not pass_tag:
                 messages.error(request, "Укажите IRF-метку объекта и метку пользователя.")
                 return redirect("inventory:index")
-
             try:
                 obj = TrackedObject.objects.get(irf_tag=irf_tag)
             except TrackedObject.DoesNotExist:
                 messages.error(request, f"Объект '{irf_tag}' не найден.")
                 return redirect("inventory:index")
-
             try:
                 user = UserTag.objects.get(pass_tag=pass_tag)
             except UserTag.DoesNotExist:
@@ -146,12 +133,10 @@ def index(request: HttpRequest) -> HttpResponse:
                 if Handout.objects.filter(object=obj, returned_at__isnull=True).exists():
                     messages.error(request, "Этот объект уже на руках.")
                     return redirect("inventory:index")
-
                 if not obj.home_cell_id and obj.cell_id:
                     obj.home_cell = obj.cell
                 obj.cell = None
                 obj.save(update_fields=["cell", "home_cell"])
-
                 Handout.objects.create(object=obj, user=user, issued_at=timezone.now())
 
             messages.success(request, "Объект выдан.")
@@ -161,7 +146,6 @@ def index(request: HttpRequest) -> HttpResponse:
             if not irf_tag:
                 messages.error(request, "Укажите IRF-метку объекта.")
                 return redirect("inventory:index")
-
             cell_code = (request.POST.get("cell_code") or "").strip()
             try:
                 obj = TrackedObject.objects.get(irf_tag=irf_tag)
@@ -173,8 +157,7 @@ def index(request: HttpRequest) -> HttpResponse:
                 active = (
                     Handout.objects.select_for_update()
                     .filter(object=obj, returned_at__isnull=True)
-                    .order_by("-issued_at")
-                    .first()
+                    .order_by("-issued_at").first()
                 )
                 if not active:
                     messages.error(request, "Активной выдачи для этого объекта нет.")
@@ -202,13 +185,11 @@ def index(request: HttpRequest) -> HttpResponse:
         messages.error(request, "Неизвестное действие.")
         return redirect("inventory:index")
 
-    # GET-запрос — показываем страницу
+    # GET
     objects = TrackedObject.objects.select_related("cell", "home_cell").order_by("irf_tag")
     active_handouts = (
-        Handout.objects
-        .select_related("object", "user")
-        .filter(returned_at__isnull=True)
-        .order_by("-issued_at")
+        Handout.objects.select_related("object", "user")
+        .filter(returned_at__isnull=True).order_by("-issued_at")
     )
     cells = Cell.objects.order_by("cell_code")
     users = UserTag.objects.order_by("pass_tag")
@@ -222,18 +203,15 @@ def index(request: HttpRequest) -> HttpResponse:
 
 
 # =====================================================================
-#  API: активные выдачи (для автообновления на сайте)
+#  API: активные выдачи
 # =====================================================================
 
 @require_GET
 def api_active_handouts(request: HttpRequest) -> JsonResponse:
     handouts = (
-        Handout.objects
-        .select_related("object", "user")
-        .filter(returned_at__isnull=True)
-        .order_by("-issued_at")
+        Handout.objects.select_related("object", "user")
+        .filter(returned_at__isnull=True).order_by("-issued_at")
     )
-
     data = [
         {
             "object_name": h.object.name or "Объект",
@@ -244,54 +222,7 @@ def api_active_handouts(request: HttpRequest) -> JsonResponse:
         }
         for h in handouts
     ]
-
     return JsonResponse({"handouts": data})
-
-
-# =====================================================================
-#  "ТУПОЙ" ЛОВЕЦ ЗАПРОСОВ ОТ ESP СУШИЛКИ
-#  Принимает ЛЮБОЙ запрос, считает что "сушилка работает",
-#  парсит humidity/temp если есть.
-# =====================================================================
-
-@csrf_exempt
-def api_dryer_ping(request: HttpRequest, path: str = "") -> JsonResponse:
-    status = DryerStatus.get()
-    status.is_active = True
-
-    raw = ""
-    try:
-        raw = request.body.decode("utf-8", errors="replace")[:500]
-    except Exception:
-        raw = ""
-    status.last_raw = raw
-
-    # Пытаемся распарсить JSON (если ESP его шлёт)
-    try:
-        data = json.loads(raw) if raw else {}
-        if isinstance(data, dict):
-            if "humidity" in data:
-                try: status.last_humidity = float(data["humidity"])
-                except (ValueError, TypeError): pass
-            if "temp" in data:
-                try: status.last_temp = float(data["temp"])
-                except (ValueError, TypeError): pass
-    except Exception:
-        # не JSON — пытаемся найти числа в теле ("humidity=85&temp=23" и т.п.)
-        import re
-        m_h = re.search(r"humidity[=:]\s*([\d.]+)", raw)
-        m_t = re.search(r"temp[=:]\s*([\d.]+)", raw)
-        if m_h:
-            try: status.last_humidity = float(m_h.group(1))
-            except ValueError: pass
-        if m_t:
-            try: status.last_temp = float(m_t.group(1))
-            except ValueError: pass
-
-    status.save()
-
-    print(f"🌧 DRYER PING: {request.method} /{path}  body={raw[:120]!r}")
-    return JsonResponse({"ok": True, "message": "caught"}, status=200)
 
 
 # =====================================================================
@@ -304,19 +235,14 @@ def api_objects(request: HttpRequest) -> JsonResponse:
 
     data = []
     for o in objects:
-        # определяем статус
         if o.is_drying:
-            status_code  = "drying"
-            status_label = "🌧 сушится"
+            status_code, status_label = "drying", "🌧 сушится"
         elif o.needs_drying:
-            status_code  = "queue"
-            status_label = "⏳ в очереди"
+            status_code, status_label = "queue", "⏳ в очереди"
         elif o.cell_id:
-            status_code  = "ok"
-            status_label = "✓ на месте"
+            status_code, status_label = "ok", "✓ на месте"
         else:
-            status_code  = "out"
-            status_label = "на руках"
+            status_code, status_label = "out", "на руках"
 
         data.append({
             "irf_tag":      o.irf_tag,
@@ -330,3 +256,113 @@ def api_objects(request: HttpRequest) -> JsonResponse:
         })
 
     return JsonResponse({"objects": data})
+
+
+# =====================================================================
+#  ЛОВЕЦ любого запроса от ESP сушилки
+# =====================================================================
+
+@csrf_exempt
+def api_dryer_ping(request: HttpRequest, path: str = "") -> JsonResponse:
+    status = DryerStatus.get()
+    status.is_active = True
+
+    raw = ""
+    try:
+        raw = request.body.decode("utf-8", errors="replace")[:500]
+    except Exception:
+        raw = ""
+
+    humidity, temp, uid, event = None, None, "", ""
+
+    # JSON
+    parsed = False
+    try:
+        data = json.loads(raw) if raw else {}
+        if isinstance(data, dict):
+            parsed = True
+            if "humidity" in data:
+                try: humidity = float(data["humidity"])
+                except (ValueError, TypeError): pass
+            if "temp" in data:
+                try: temp = float(data["temp"])
+                except (ValueError, TypeError): pass
+            uid   = (data.get("uid")   or "").strip()
+            event = (data.get("event") or "").strip()
+    except Exception:
+        parsed = False
+
+    # Regex — если не JSON
+    if not parsed:
+        m_h = re.search(r"humidity[=:]\s*([\d.]+)", raw)
+        m_t = re.search(r"temp[=:]\s*([\d.]+)",     raw)
+        m_u = re.search(r"uid[=:]\s*([A-Fa-f0-9 :]+)", raw)
+        if m_h:
+            try: humidity = float(m_h.group(1))
+            except ValueError: pass
+        if m_t:
+            try: temp = float(m_t.group(1))
+            except ValueError: pass
+        if m_u: uid = m_u.group(1).strip()
+
+    if humidity is not None: status.last_humidity = humidity
+    if temp     is not None: status.last_temp     = temp
+
+    # Если пришёл UID зонта — обновляем его
+    if uid:
+        try:
+            obj = TrackedObject.objects.get(irf_tag=uid)
+            obj.is_drying = True
+            if humidity is not None: obj.last_humidity = humidity
+            if temp     is not None: obj.last_temp     = temp
+
+            if event == "finished":
+                obj.is_drying     = False
+                obj.needs_drying  = False
+                obj.last_dried_at = timezone.now()
+
+            obj.save(update_fields=[
+                "is_drying", "needs_drying",
+                "last_humidity", "last_temp", "last_dried_at",
+            ])
+            print(f"  → зонт {uid}: is_drying={obj.is_drying}, H={humidity}, T={temp}")
+        except TrackedObject.DoesNotExist:
+            print(f"  ⚠ UID {uid!r} не найден в БД")
+
+    status.last_raw = f"uid={uid} H={humidity} T={temp} ev={event}"
+    status.save()
+
+    print(f"🌧 DRYER PING: {request.method} /{path}  uid={uid!r}  H={humidity}  T={temp}  event={event!r}")
+    return JsonResponse({"ok": True, "message": "caught", "umbrella": uid or None}, status=200)
+
+
+# =====================================================================
+#  API: статус сушилки
+# =====================================================================
+
+@require_GET
+def api_dryer_status(request: HttpRequest) -> JsonResponse:
+    s = DryerStatus.get()
+
+    idle_after_sec = 30
+    is_active = s.is_active
+    if s.last_update:
+        delta = (timezone.now() - s.last_update).total_seconds()
+        if delta > idle_after_sec:
+            is_active = False
+            if s.is_active:
+                s.is_active = False
+                s.save(update_fields=["is_active"])
+
+    current = TrackedObject.objects.filter(is_drying=True).first()
+
+    return JsonResponse({
+        "active":   is_active,
+        "humidity": s.last_humidity,
+        "temp":     s.last_temp,
+        "updated":  timezone.localtime(s.last_update).strftime("%H:%M:%S") if s.last_update else None,
+        "umbrella": {
+            "uid":  current.irf_tag if current else None,
+            "name": (current.name if current else "") or "",
+        } if current else None,
+    })
