@@ -1,116 +1,173 @@
-from __future__ import annotations
-
-from django.core.exceptions import ValidationError
 from django.db import models
-from django.db.models import Q
-from django.utils import timezone
 
 
-class UserTag(models.Model):
-    full_name = models.CharField(max_length=200, blank=True, default="")
-    pass_tag = models.CharField(max_length=64, unique=True)
-    status = models.CharField(max_length=32, blank=True, default="active")
-    created_at = models.DateTimeField(auto_now_add=True)
-
-    class Meta:
-        verbose_name = "Пользователь (метка/пропуск)"
-        verbose_name_plural = "Пользователи (метки/пропуска)"
-
-    def __str__(self) -> str:
-        return f"{self.full_name or 'Без имени'} [{self.pass_tag}]"
-
-
+# ═════════════════════════════════════════════════════════════
+#  Ячейка (слот для зонта в стойке)
+# ═════════════════════════════════════════════════════════════
 class Cell(models.Model):
-    cell_code = models.CharField(max_length=64, unique=True)
-    zone = models.CharField(max_length=64, blank=True, default="")
-    status = models.CharField(max_length=32, blank=True, default="active")
-    created_at = models.DateTimeField(auto_now_add=True)
+    cell_code = models.CharField(
+        max_length=32,
+        unique=True,
+        verbose_name="Код ячейки",
+        help_text="Например: A1, A2, B1...",
+    )
+    zone = models.CharField(
+        max_length=64,
+        blank=True,
+        default="",
+        verbose_name="Зона / локация",
+        help_text="Например: Главный вход, Кафетерий",
+    )
 
     class Meta:
         verbose_name = "Ячейка"
         verbose_name_plural = "Ячейки"
+        ordering = ["cell_code"]
 
-    def __str__(self) -> str:
+    def __str__(self):
         return self.cell_code
 
 
+# ═════════════════════════════════════════════════════════════
+#  Объект учёта (зонт)
+# ═════════════════════════════════════════════════════════════
 class TrackedObject(models.Model):
-    irf_tag = models.CharField(max_length=128, unique=True)
-    name = models.CharField(max_length=200, blank=True, default="")
+    irf_tag = models.CharField(
+        max_length=128,
+        unique=True,
+        verbose_name="IRF-метка (UID зонта)",
+    )
+    name = models.CharField(
+        max_length=200,
+        blank=True,
+        default="",
+        verbose_name="Название / номер зонта",
+    )
     cell = models.ForeignKey(
         Cell,
+        on_delete=models.SET_NULL,
         null=True,
         blank=True,
-        on_delete=models.SET_NULL,
-        related_name="tracked_objects",
-        help_text="Текущее местоположение (None = на руках)",
+        related_name="objects",
+        verbose_name="Текущая ячейка",
+        help_text="Где зонт сейчас. NULL — на руках у клиента.",
     )
     home_cell = models.ForeignKey(
         Cell,
+        on_delete=models.SET_NULL,
         null=True,
         blank=True,
-        on_delete=models.SET_NULL,
         related_name="home_objects",
-        help_text="Родная ячейка, куда зонт возвращается по умолчанию",
+        verbose_name="Домашняя ячейка",
+        help_text="Куда возвращать зонт по умолчанию.",
     )
-    state = models.CharField(max_length=32, blank=True, default="ok")
-    created_at = models.DateTimeField(auto_now_add=True)
+    state = models.CharField(
+        max_length=32,
+        default="ok",
+        verbose_name="Состояние",
+        help_text="ok / broken / lost ...",
+    )
+    created_at = models.DateTimeField(
+        auto_now_add=True,
+        verbose_name="Дата добавления",
+    )
+
+    # ───── Поля для системы сушки ─────
+    needs_drying = models.BooleanField(
+        default=False,
+        verbose_name="Требует сушки",
+        help_text="Устанавливается при возврате зонта. Сушилка опрашивает это поле.",
+    )
+    is_drying = models.BooleanField(
+        default=False,
+        verbose_name="Сушится сейчас",
+        help_text="True — зонт в процессе сушки.",
+    )
+    last_dried_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        verbose_name="Последняя сушка",
+    )
+    last_humidity = models.FloatField(
+        null=True,
+        blank=True,
+        verbose_name="Последняя влажность, %",
+    )
+    last_temp = models.FloatField(
+        null=True,
+        blank=True,
+        verbose_name="Последняя температура, °C",
+    )
 
     class Meta:
-        verbose_name = "Объект"
-        verbose_name_plural = "Объекты"
+        verbose_name = "Зонт"
+        verbose_name_plural = "Зонты"
+        ordering = ["irf_tag"]
 
-    def __str__(self) -> str:
-        return f"{self.name or 'Объект'} [{self.irf_tag}]"
-
-    @property
-    def is_on_hands(self) -> bool:
-        return self.cell_id is None
+    def __str__(self):
+        return f"{self.irf_tag} ({self.name or 'зонт'})"
 
 
+# ═════════════════════════════════════════════════════════════
+#  Пользовательская метка (RFID-карта клиента)
+# ═════════════════════════════════════════════════════════════
+class UserTag(models.Model):
+    pass_tag = models.CharField(
+        max_length=128,
+        unique=True,
+        verbose_name="UID карты",
+        help_text="Например: '93 94 31 30'",
+    )
+    full_name = models.CharField(
+        max_length=200,
+        blank=True,
+        default="",
+        verbose_name="ФИО клиента",
+    )
+    created_at = models.DateTimeField(
+        auto_now_add=True,
+        verbose_name="Дата регистрации",
+    )
+
+    class Meta:
+        verbose_name = "Клиент / карта"
+        verbose_name_plural = "Клиенты / карты"
+        ordering = ["pass_tag"]
+
+    def __str__(self):
+        return f"{self.full_name or '(без имени)'} [{self.pass_tag}]"
+
+
+# ═════════════════════════════════════════════════════════════
+#  Выдача (факт того, что зонт на руках у клиента)
+# ═════════════════════════════════════════════════════════════
 class Handout(models.Model):
     object = models.ForeignKey(
-        TrackedObject, on_delete=models.PROTECT, related_name="handouts"
+        TrackedObject,
+        on_delete=models.CASCADE,
+        related_name="handouts",
+        verbose_name="Зонт",
     )
-    user = models.ForeignKey(UserTag, on_delete=models.PROTECT, related_name="handouts")
-    issued_at = models.DateTimeField(default=timezone.now)
-    returned_at = models.DateTimeField(null=True, blank=True)
-    note = models.TextField(blank=True, default="")
+    user = models.ForeignKey(
+        UserTag,
+        on_delete=models.CASCADE,
+        related_name="handouts",
+        verbose_name="Клиент",
+    )
+    issued_at = models.DateTimeField(
+        verbose_name="Выдан",
+    )
+    returned_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        verbose_name="Возвращён",
+    )
 
     class Meta:
-        verbose_name = "Выдача на руки"
-        verbose_name_plural = "Выдачи на руки"
-        constraints = [
-            models.UniqueConstraint(
-                fields=["object"],
-                condition=Q(returned_at__isnull=True),
-                name="uniq_active_handout_per_object",
-            )
-        ]
+        verbose_name = "Выдача"
+        verbose_name_plural = "Выдачи"
+        ordering = ["-issued_at"]
 
-    def __str__(self) -> str:
+    def __str__(self):
         status = "активна" if self.returned_at is None else "закрыта"
         return f"{self.object.irf_tag} → {self.user.pass_tag} ({status})"
-
-    def clean(self) -> None:
-        super().clean()
-        if self.returned_at is None and self.object.cell_id is not None:
-            raise ValidationError(
-                {"object": "Нельзя выдать объект на руки, пока он находится в ячейке."}
-            )
-    class TrackedObject(models.Model):
-        irf_tag = models.CharField(max_length=128, unique=True)
-        name = models.CharField(max_length=200, blank=True, default="")
-        cell = models.ForeignKey("Cell", on_delete=models.SET_NULL, null=True, blank=True, related_name="objects")
-        home_cell = models.ForeignKey("Cell", on_delete=models.SET_NULL, null=True, blank=True, related_name="home_objects")
-        state = models.CharField(max_length=32, default="ok")
-        
-        # ✅ НОВЫЕ ПОЛЯ ДЛЯ СУШКИ
-        needs_drying = models.BooleanField(default=False, verbose_name="Требует сушки")
-        is_drying = models.BooleanField(default=False, verbose_name="Сушится сейчас")
-        last_dried_at = models.DateTimeField(null=True, blank=True, verbose_name="Последняя сушка")
-        last_humidity = models.FloatField(null=True, blank=True, verbose_name="Последняя влажность, %")
-        last_temp = models.FloatField(null=True, blank=True, verbose_name="Последняя температура, °C")
-
-        def __str__(self):
-            return f"{self.irf_tag} ({self.name or 'зонт'})"
