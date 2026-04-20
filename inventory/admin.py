@@ -10,9 +10,8 @@ class CellAdmin(admin.ModelAdmin):
 
 @admin.register(TrackedObject)
 class TrackedObjectAdmin(admin.ModelAdmin):
-    list_display        = ("irf_tag", "name", "cell", "home_cell")
-    search_fields       = ("irf_tag", "name")
-    autocomplete_fields = ("cell", "home_cell")
+    list_display  = ("irf_tag", "name", "cell", "home_cell")
+    search_fields = ("irf_tag", "name")
 
 
 @admin.register(UserTag)
@@ -23,7 +22,6 @@ class UserTagAdmin(admin.ModelAdmin):
 
 @admin.register(Handout)
 class HandoutAdmin(admin.ModelAdmin):
-    list_display        = ("object", "user", "issued_at", "returned_at")
-    list_filter         = ("returned_at",)
-    autocomplete_fields = ("object", "user")
-    search_fields       = ("object__irf_tag", "user__pass_tag")
+    list_display  = ("object", "user", "issued_at", "returned_at")
+    list_filter   = ("returned_at",)
+    search_fields = ("object__irf_tag", "user__pass_tag")
