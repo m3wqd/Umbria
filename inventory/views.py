@@ -73,14 +73,19 @@ def api_rent(request: HttpRequest) -> JsonResponse:
             active.returned_at = timezone.now()
             active.save(update_fields=["returned_at"])
 
+            # ✅ Ставим зонт в очередь на сушку
+            obj.needs_drying = True
+            
             if obj.home_cell_id:
                 obj.cell = obj.home_cell
-                obj.save(update_fields=["cell"])
+            
+            obj.save(update_fields=["cell", "needs_drying"])
 
             return JsonResponse({
                 "action": "return",
                 "umbrella": obj.irf_tag,
-                "message": "возврат принят",
+                "message": "возврат принят, зонт отправлен на сушку",
+                "needs_drying": True,
             })
 
         # ============ ВЫДАЧА ============
@@ -262,3 +267,131 @@ def api_active_handouts(request: HttpRequest) -> JsonResponse:
     ]
 
     return JsonResponse({"handouts": data})
+# =====================================================================
+#  API для станции сушки (ESP8266/ESP32)
+# =====================================================================
+
+@csrf_exempt
+@require_POST
+def api_dryer(request: HttpRequest) -> JsonResponse:
+    """
+    Единый endpoint для станции сушки.
+    Принимает разные события по полю 'event':
+      - check     : есть ли зонт на сушку? (возвращает irf_tag или null)
+      - start     : сушка началась
+      - finished  : зонт высох
+      - failed    : сушка прервана (таймаут/перегрев)
+      - status    : периодический статус (temp, humidity, state)
+    """
+    # --- Проверка токена ---
+    expected_token = getattr(settings, "ARDUINO_TOKEN", None)
+    if expected_token and request.headers.get("X-Device-Token") != expected_token:
+        return JsonResponse({"ok": False, "message": "unauthorized"}, status=401)
+
+    # --- Парсинг JSON ---
+    try:
+        data = json.loads(request.body.decode("utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return JsonResponse({"ok": False, "message": "invalid json"}, status=400)
+
+    event = (data.get("event") or "").strip()
+    uid = (data.get("uid") or "").strip()
+    temp = data.get("temp")
+    humidity = data.get("humidity")
+
+    print(f"[api_dryer] event={event!r} uid={uid!r} temp={temp} humidity={humidity}")
+
+    # ====================================================
+    #  CHECK — Arduino спрашивает: "что мне делать?"
+    # ====================================================
+    if event == "check":
+        # Ищем первый зонт, который ждёт сушки
+        obj = (
+            TrackedObject.objects
+            .filter(needs_drying=True, is_drying=False)
+            .order_by("irf_tag")
+            .first()
+        )
+        if obj:
+            print(f"[api_dryer] → сушилке выдано задание: {obj.irf_tag}")
+            return JsonResponse({
+                "ok": True,
+                "action": "dry",
+                "umbrella": obj.irf_tag,
+                "name": obj.name or "",
+            })
+        else:
+            return JsonResponse({"ok": True, "action": "idle"})
+
+    # ====================================================
+    #  START — сушилка начала процесс
+    # ====================================================
+    if event == "start":
+        if not uid:
+            return JsonResponse({"ok": False, "message": "uid required"}, status=400)
+        try:
+            obj = TrackedObject.objects.get(irf_tag=uid)
+        except TrackedObject.DoesNotExist:
+            return JsonResponse({"ok": False, "message": "umbrella not found"}, status=404)
+        
+        obj.is_drying = True
+        if humidity is not None:
+            obj.last_humidity = float(humidity)
+        if temp is not None:
+            obj.last_temp = float(temp)
+        obj.save(update_fields=["is_drying", "last_humidity", "last_temp"])
+        
+        print(f"[api_dryer] СТАРТ сушки: {uid} (H={humidity}% T={temp}°C)")
+        return JsonResponse({"ok": True, "message": "drying started"})
+
+    # ====================================================
+    #  FINISHED — зонт высох
+    # ====================================================
+    if event == "finished":
+        if not uid:
+            return JsonResponse({"ok": False, "message": "uid required"}, status=400)
+        try:
+            obj = TrackedObject.objects.get(irf_tag=uid)
+        except TrackedObject.DoesNotExist:
+            return JsonResponse({"ok": False, "message": "umbrella not found"}, status=404)
+        
+        obj.needs_drying = False
+        obj.is_drying = False
+        obj.last_dried_at = timezone.now()
+        if humidity is not None:
+            obj.last_humidity = float(humidity)
+        if temp is not None:
+            obj.last_temp = float(temp)
+        obj.save(update_fields=["needs_drying", "is_drying", "last_dried_at", "last_humidity", "last_temp"])
+        
+        print(f"[api_dryer] ВЫСОХ: {uid} (H={humidity}% T={temp}°C)")
+        return JsonResponse({"ok": True, "message": "ok"})
+
+    # ====================================================
+    #  FAILED — сушка прервана
+    # ====================================================
+    if event == "failed":
+        if not uid:
+            return JsonResponse({"ok": False, "message": "uid required"}, status=400)
+        try:
+            obj = TrackedObject.objects.get(irf_tag=uid)
+            obj.is_drying = False
+            # needs_drying оставляем True, попробуем ещё раз
+            obj.save(update_fields=["is_drying"])
+        except TrackedObject.DoesNotExist:
+            pass
+        
+        print(f"[api_dryer] ❌ СБОЙ сушки: {uid}")
+        return JsonResponse({"ok": True, "message": "ok"})
+
+    # ====================================================
+    #  STATUS — периодический отчёт
+    # ====================================================
+    if event == "status":
+        state = data.get("state", "?")
+        heater = data.get("heater", "?")
+        fan = data.get("fan", "?")
+        print(f"[api_dryer] status: state={state} T={temp}°C H={humidity}% heater={heater} fan={fan}")
+        return JsonResponse({"ok": True})
+
+    return JsonResponse({"ok": False, "message": f"unknown event: {event}"}, status=400)

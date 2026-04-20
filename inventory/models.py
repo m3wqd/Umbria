@@ -98,3 +98,19 @@ class Handout(models.Model):
             raise ValidationError(
                 {"object": "Нельзя выдать объект на руки, пока он находится в ячейке."}
             )
+    class TrackedObject(models.Model):
+        irf_tag = models.CharField(max_length=128, unique=True)
+        name = models.CharField(max_length=200, blank=True, default="")
+        cell = models.ForeignKey("Cell", on_delete=models.SET_NULL, null=True, blank=True, related_name="objects")
+        home_cell = models.ForeignKey("Cell", on_delete=models.SET_NULL, null=True, blank=True, related_name="home_objects")
+        state = models.CharField(max_length=32, default="ok")
+        
+        # ✅ НОВЫЕ ПОЛЯ ДЛЯ СУШКИ
+        needs_drying = models.BooleanField(default=False, verbose_name="Требует сушки")
+        is_drying = models.BooleanField(default=False, verbose_name="Сушится сейчас")
+        last_dried_at = models.DateTimeField(null=True, blank=True, verbose_name="Последняя сушка")
+        last_humidity = models.FloatField(null=True, blank=True, verbose_name="Последняя влажность, %")
+        last_temp = models.FloatField(null=True, blank=True, verbose_name="Последняя температура, °C")
+
+        def __str__(self):
+            return f"{self.irf_tag} ({self.name or 'зонт'})"
