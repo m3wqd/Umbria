@@ -155,7 +155,7 @@
 
     <div id="dryer-box">💤 Сушилка: ожидание</div>
 
-    <h1>☂️ Umbria — учёт зонтов</h1>
+    <h1>Umbria - учёт зонтов</h1>
 
     {% if messages %}
         <div class="messages">
@@ -167,7 +167,7 @@
 
     <div class="cards">
         <div class="card">
-            <h3>📤 Выдать зонт (вручную)</h3>
+            <h3>Выдать зонт (вручную)</h3>
             <form method="post">
                 {% csrf_token %}
                 <input type="hidden" name="action" value="take">
@@ -191,7 +191,7 @@
         </div>
 
         <div class="card">
-            <h3>📥 Вернуть зонт (вручную)</h3>
+            <h3>Вернуть зонт (вручную)</h3>
             <form method="post">
                 {% csrf_token %}
                 <input type="hidden" name="action" value="return">
@@ -215,7 +215,7 @@
         </div>
     </div>
 
-    <h2>🎒 Сейчас на руках <span class="refresh-hint">(обновляется автоматически)</span></h2>
+    <h2>Сейчас на руках <span class="refresh-hint">(обновляется автоматически)</span></h2>
     <table>
         <thead>
             <tr>
@@ -241,7 +241,7 @@
         </tbody>
     </table>
 
-    <h2>📋 Все зонты <span class="refresh-hint">(обновляется автоматически)</span></h2>
+    <h2>Все зонты <span class="refresh-hint">(обновляется автоматически)</span></h2>
     <table>
         <thead>
             <tr>
