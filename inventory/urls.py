@@ -4,14 +4,20 @@ from . import views
 app_name = "inventory"
 
 urlpatterns = [
-    path("",                  views.index,                name="index"),
-    path("api/rent/",         views.api_rent,             name="api_rent"),
-    path("api/active/",       views.api_active_handouts,  name="api_active"),
-    path("api/objects/",      views.api_objects,          name="api_objects"),
-    path("api/dryer/status/", views.api_dryer_status,     name="api_dryer_status"),
-    path("api/dryer/done/",   views.api_dryer_done,       name="api_dryer_done"),
+    path("",                    views.index,                 name="index"),
 
-    # Ловцы запросов от сушилки (принимают любой формат URL)
+    # Старый (одним запросом) — для обратной совместимости
+    path("api/rent/",           views.api_rent,              name="api_rent"),
+
+    # Новые — двумя запросами
+    path("api/rent/card/",      views.api_rent_card,         name="api_rent_card"),
+    path("api/rent/umbrella/",  views.api_rent_umbrella,     name="api_rent_umbrella"),
+
+    path("api/active/",         views.api_active_handouts,   name="api_active"),
+    path("api/objects/",        views.api_objects,           name="api_objects"),
+    path("api/dryer/status/",   views.api_dryer_status,      name="api_dryer_status"),
+    path("api/dryer/done/",     views.api_dryer_done,        name="api_dryer_done"),
+
     re_path(r"^api/dryer/?$",    views.api_dryer_ping, name="api_dryer_ping_1"),
     re_path(r"^api/dry/?$",      views.api_dryer_ping, name="api_dryer_ping_2"),
     re_path(r"^api/humidity/?$", views.api_dryer_ping, name="api_dryer_ping_3"),

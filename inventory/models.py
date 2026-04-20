@@ -198,3 +198,21 @@ class DryerStatus(models.Model):
     def get(cls):
         obj, _ = cls.objects.get_or_create(pk=1)
         return obj
+
+class RentSession(models.Model):
+    """
+    Временная сессия: клиент приложил карту и ждём зонт.
+    Живёт 30 секунд, потом протухает.
+    """
+    user = models.ForeignKey(UserTag, on_delete=models.CASCADE, verbose_name="Клиент")
+    mode = models.CharField(max_length=10, verbose_name="Режим",
+                            help_text="take (ожидается выдача) / return (ожидается возврат)")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = "Сессия аренды"
+        verbose_name_plural = "Сессии аренды"
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"{self.user} — ждём {self.mode}"
