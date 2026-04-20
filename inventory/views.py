@@ -17,14 +17,109 @@ from .models import Cell, Handout, TrackedObject, UserTag, DryerStatus, RentSess
 
 
 # =====================================================================
-#  СТАРАЯ РУЧКА /api/rent/ — теперь работает как "приложили карту".
-#  Принимает uid карты, НИЧЕГО не меняет в БД,
-#  только создаёт сессию "жду зонт".
+#  ОДНИМ ЗАПРОСОМ (совместимость со старой схемой)
 # =====================================================================
 
 @csrf_exempt
 @require_POST
 def api_rent(request: HttpRequest) -> JsonResponse:
+    """Старая ручка: всё одним запросом. Оставлена для совместимости."""
+    expected_token = getattr(settings, "ARDUINO_TOKEN", None)
+    if expected_token and request.headers.get("X-Device-Token") != expected_token:
+        return JsonResponse({"action": "error", "message": "unauthorized"}, status=401)
+
+    try:
+        data = json.loads(request.body.decode("utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return JsonResponse({"action": "error", "message": "invalid json"}, status=400)
+
+    card_uid = (data.get("card") or data.get("uid") or "").strip()
+    umbr_uid = (data.get("umbrella_uid") or "").strip()
+    if "box_has_umbrella" in data:
+        box_has = bool(data.get("box_has_umbrella"))
+    else:
+        box_has = True  # по умолчанию — зонт есть
+
+    if not card_uid:
+        return JsonResponse({"action": "error", "message": "card uid required"}, status=400)
+
+    print(f"[api_rent] card={card_uid!r} box={box_has} umbrella={umbr_uid!r}")
+
+    try:
+        user = UserTag.objects.get(pass_tag=card_uid)
+    except UserTag.DoesNotExist:
+        return JsonResponse({"action": "error", "message": "card not registered"}, status=404)
+
+    with transaction.atomic():
+        active = (
+            Handout.objects.select_for_update()
+            .filter(user=user, returned_at__isnull=True)
+            .select_related("object").first()
+        )
+
+        if active and box_has:
+            obj = active.object
+            active.returned_at = timezone.now()
+            active.save(update_fields=["returned_at"])
+            obj.needs_drying = True
+            if obj.home_cell_id:
+                obj.cell = obj.home_cell
+            obj.save(update_fields=["cell", "needs_drying"])
+            print(f"  ✅ ВОЗВРАТ {obj.irf_tag}")
+            return JsonResponse({
+                "action": "return", "umbrella": obj.irf_tag,
+                "message": "возврат принят, зонт отправлен на сушку",
+            })
+
+        if active and not box_has:
+            return JsonResponse({
+                "action": "wait_return", "umbrella": active.object.irf_tag,
+                "message": "положите зонт в бокс",
+            })
+
+        if not active and box_has:
+            umbrella = None
+            if umbr_uid:
+                try:
+                    umbrella = TrackedObject.objects.get(irf_tag=umbr_uid)
+                except TrackedObject.DoesNotExist:
+                    pass
+            if not umbrella:
+                open_h = Handout.objects.filter(object=OuterRef('pk'), returned_at__isnull=True)
+                umbrella = (
+                    TrackedObject.objects.filter(cell__isnull=False)
+                    .annotate(has_open=Exists(open_h)).filter(has_open=False)
+                    .order_by("irf_tag").first()
+                )
+            if not umbrella:
+                return JsonResponse({"action": "error", "message": "нет свободных зонтов"}, status=409)
+
+            if not umbrella.home_cell_id and umbrella.cell_id:
+                umbrella.home_cell = umbrella.cell
+            umbrella.cell = None
+            umbrella.save(update_fields=["cell", "home_cell"])
+
+            Handout.objects.create(object=umbrella, user=user, issued_at=timezone.now())
+            print(f"  ✅ ВЫДАН {umbrella.irf_tag}")
+            return JsonResponse({
+                "action": "take", "umbrella": umbrella.irf_tag,
+                "message": "зонт выдан",
+            })
+
+        return JsonResponse({"action": "empty", "message": "в боксе нет зонта"})
+
+
+# =====================================================================
+#  ШАГ 1: приложили КАРТУ — создаём сессию, ждём зонт
+# =====================================================================
+
+@csrf_exempt
+@require_POST
+def api_rent_card(request: HttpRequest) -> JsonResponse:
+    expected_token = getattr(settings, "ARDUINO_TOKEN", None)
+    if expected_token and request.headers.get("X-Device-Token") != expected_token:
+        return JsonResponse({"action": "error", "message": "unauthorized"}, status=401)
+
     try:
         data = json.loads(request.body.decode("utf-8"))
     except (json.JSONDecodeError, UnicodeDecodeError):
@@ -34,60 +129,49 @@ def api_rent(request: HttpRequest) -> JsonResponse:
     if not card_uid:
         return JsonResponse({"action": "error", "message": "card uid required"}, status=400)
 
-    print(f"\n[api_rent] 💳 КАРТА: {card_uid!r}")
+    print(f"[api_rent_card] card={card_uid!r}")
 
     try:
         user = UserTag.objects.get(pass_tag=card_uid)
     except UserTag.DoesNotExist:
-        print("   ❌ карта не зарегистрирована")
         return JsonResponse({"action": "error", "message": "card not registered"}, status=404)
 
-    # чистим просроченные сессии
+    # чистим просроченные сессии (старше 30 сек)
     cutoff = timezone.now() - timezone.timedelta(seconds=30)
     RentSession.objects.filter(created_at__lt=cutoff).delete()
 
-    # режим — только для ответа Arduino
+    # есть ли у клиента зонт на руках?
     has_umbrella = Handout.objects.filter(user=user, returned_at__isnull=True).exists()
     mode = "return" if has_umbrella else "take"
 
-    # Пересоздаём сессию этого клиента
+    # создаём свежую сессию (удаляем старые этого клиента)
     RentSession.objects.filter(user=user).delete()
     RentSession.objects.create(user=user, mode=mode)
-
-    print(f"   → сессия: ждём RFID зонта для {mode.upper()}")
-    print(f"   ⚠  СТАТУС НЕ ИЗМЕНЁН")
 
     if mode == "return":
         active = (
             Handout.objects.filter(user=user, returned_at__isnull=True)
             .select_related("object").first()
         )
+        umbrella_tag = active.object.irf_tag if active else ""
+        print(f"  → ждём ВОЗВРАТ зонта {umbrella_tag}")
         return JsonResponse({
             "action":   "wait_umbrella",
             "mode":     "return",
             "message":  "приложите зонт для возврата",
-            "umbrella": active.object.irf_tag if active else "",
+            "umbrella": umbrella_tag,
         })
-    return JsonResponse({
-        "action":  "wait_umbrella",
-        "mode":    "take",
-        "message": "приложите зонт для выдачи",
-    })
+    else:
+        print(f"  → ждём зонт для ВЫДАЧИ")
+        return JsonResponse({
+            "action":  "wait_umbrella",
+            "mode":    "take",
+            "message": "приложите зонт для выдачи",
+        })
 
 
 # =====================================================================
-#  ШАГ 1: /api/rent/card/ — приложили карту (та же логика, что api_rent)
-# =====================================================================
-
-@csrf_exempt
-@require_POST
-def api_rent_card(request: HttpRequest) -> JsonResponse:
-    return api_rent(request)   # делегируем старой ручке
-
-
-# =====================================================================
-#  ШАГ 2: /api/rent/umbrella/ — приложили RFID зонта.
-#  Вот тут и меняем статус!
+#  ШАГ 2: приложили ЗОНТ — ищем сессию, завершаем операцию
 # =====================================================================
 
 @csrf_exempt
@@ -106,26 +190,19 @@ def api_rent_umbrella(request: HttpRequest) -> JsonResponse:
     if not umbrella_uid:
         return JsonResponse({"action": "error", "message": "umbrella uid required"}, status=400)
 
-    print(f"\n[api_rent_umbrella] ☂ ЗОНТ: {umbrella_uid!r}")
+    print(f"[api_rent_umbrella] umbrella={umbrella_uid!r}")
 
     try:
         umbrella = TrackedObject.objects.get(irf_tag=umbrella_uid)
     except TrackedObject.DoesNotExist:
-        print("   ❌ зонт не найден в БД")
         return JsonResponse({"action": "error", "message": "umbrella not registered"}, status=404)
 
-    # чистим просроченные сессии
     cutoff = timezone.now() - timezone.timedelta(seconds=30)
     RentSession.objects.filter(created_at__lt=cutoff).delete()
 
     with transaction.atomic():
-        session = (
-            RentSession.objects.select_for_update()
-            .select_related("user")
-            .order_by("-created_at").first()
-        )
+        session = RentSession.objects.select_for_update().order_by("-created_at").first()
         if not session:
-            print("   ❌ нет активной сессии — сначала приложите карту")
             return JsonResponse({
                 "action":  "error",
                 "message": "сначала приложите карту",
@@ -138,10 +215,8 @@ def api_rent_umbrella(request: HttpRequest) -> JsonResponse:
         if mode == "take":
             if Handout.objects.filter(object=umbrella, returned_at__isnull=True).exists():
                 session.delete()
-                print("   ❌ этот зонт уже на руках у другого клиента")
                 return JsonResponse({
-                    "action":  "error",
-                    "message": "этот зонт уже на руках",
+                    "action": "error", "message": "этот зонт уже на руках",
                 }, status=409)
 
             if not umbrella.home_cell_id and umbrella.cell_id:
@@ -152,7 +227,7 @@ def api_rent_umbrella(request: HttpRequest) -> JsonResponse:
             Handout.objects.create(object=umbrella, user=user, issued_at=timezone.now())
             session.delete()
 
-            print(f"   ✅ ВЫДАН {umbrella.irf_tag} → {user.pass_tag}")
+            print(f"  ✅ ВЫДАН {umbrella.irf_tag} → {user.pass_tag}")
             return JsonResponse({
                 "action":   "take",
                 "umbrella": umbrella.irf_tag,
@@ -167,17 +242,14 @@ def api_rent_umbrella(request: HttpRequest) -> JsonResponse:
             )
             if not active:
                 session.delete()
-                print("   ❌ у клиента нет активной выдачи")
                 return JsonResponse({
-                    "action":  "error",
-                    "message": "у клиента нет активной выдачи",
+                    "action": "error", "message": "у клиента нет активной выдачи",
                 }, status=409)
 
             if active.object_id != umbrella.id:
-                print(f"   ⚠ ожидали {active.object.irf_tag}, получен {umbrella.irf_tag}")
                 return JsonResponse({
-                    "action":  "error",
-                    "message": f"ожидали {active.object.irf_tag}, получен {umbrella.irf_tag}",
+                    "action": "error",
+                    "message": f"ожидали зонт {active.object.irf_tag}, получен {umbrella.irf_tag}",
                 }, status=409)
 
             active.returned_at = timezone.now()
@@ -190,7 +262,7 @@ def api_rent_umbrella(request: HttpRequest) -> JsonResponse:
 
             session.delete()
 
-            print(f"   ✅ ВОЗВРАТ {umbrella.irf_tag} → сушка")
+            print(f"  ✅ ВОЗВРАТ {umbrella.irf_tag}")
             return JsonResponse({
                 "action":   "return",
                 "umbrella": umbrella.irf_tag,
@@ -457,7 +529,7 @@ def api_dryer_status(request: HttpRequest) -> JsonResponse:
 
 
 # =====================================================================
-#  API: ручное завершение сушки (кнопка "✓ готов" на сайте)
+#  API: ручное завершение сушки
 # =====================================================================
 
 @csrf_exempt
