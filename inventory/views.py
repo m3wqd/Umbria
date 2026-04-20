@@ -295,27 +295,38 @@ def api_dryer_ping(request: HttpRequest, path: str = "") -> JsonResponse:
 
 
 # =====================================================================
-#  API: статус сушилки (для авто-обновления на сайте)
+#  API: список всех зонтов (для авто-обновления таблицы "Все зонты")
 # =====================================================================
 
 @require_GET
-def api_dryer_status(request: HttpRequest) -> JsonResponse:
-    s = DryerStatus.get()
+def api_objects(request: HttpRequest) -> JsonResponse:
+    objects = TrackedObject.objects.select_related("cell", "home_cell").order_by("irf_tag")
 
-    # если последнее обновление было давно (>30 сек) — сушка закончилась
-    idle_after_sec = 30
-    is_active = s.is_active
-    if s.last_update:
-        delta = (timezone.now() - s.last_update).total_seconds()
-        if delta > idle_after_sec:
-            is_active = False
-            if s.is_active:
-                s.is_active = False
-                s.save(update_fields=["is_active"])
+    data = []
+    for o in objects:
+        # определяем статус
+        if o.is_drying:
+            status_code  = "drying"
+            status_label = "🌧 сушится"
+        elif o.needs_drying:
+            status_code  = "queue"
+            status_label = "⏳ в очереди"
+        elif o.cell_id:
+            status_code  = "ok"
+            status_label = "✓ на месте"
+        else:
+            status_code  = "out"
+            status_label = "на руках"
 
-    return JsonResponse({
-        "active":   is_active,
-        "humidity": s.last_humidity,
-        "temp":     s.last_temp,
-        "updated":  timezone.localtime(s.last_update).strftime("%H:%M:%S") if s.last_update else None,
-    })
+        data.append({
+            "irf_tag":      o.irf_tag,
+            "name":         o.name or "",
+            "cell":         o.cell.cell_code if o.cell else "",
+            "home_cell":    o.home_cell.cell_code if o.home_cell else "",
+            "status_code":  status_code,
+            "status_label": status_label,
+            "humidity":     o.last_humidity,
+            "temp":         o.last_temp,
+        })
+
+    return JsonResponse({"objects": data})
