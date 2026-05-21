@@ -5,7 +5,7 @@ import os
 DEBUG = os.environ.get("DJANGO_DEBUG", "0") == "1"
 
 ALLOWED_HOSTS = [
-    "193.233.217.190",
+    "77.221.158.172",
     "localhost",
     "127.0.0.1",
 ]
@@ -15,8 +15,8 @@ SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY", "dev-secret-key-change-me")
 
 # CSRF для HTTPS (если будет)
 CSRF_TRUSTED_ORIGINS = [
-    "http://193.233.217.190",
-    "http://193.233.217.190:8000",
+    "http://77.221.158.172",
+    "http://77.221.158.172:8000",
 ]
 BASE_DIR = Path(__file__).resolve().parent.parent
 
