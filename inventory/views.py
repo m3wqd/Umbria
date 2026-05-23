@@ -22,33 +22,46 @@ from .models import Cell, Handout, TrackedObject, UserTag, DryerStatus, RentSess
 
 @csrf_exempt
 @require_POST
+@csrf_exempt
 def api_rent(request: HttpRequest) -> JsonResponse:
-    """Старая ручка: всё одним запросом. Оставлена для совместимости."""
+    """Аренда/возврат + команда открыть дверь."""
     expected_token = getattr(settings, "ARDUINO_TOKEN", None)
     if expected_token and request.headers.get("X-Device-Token") != expected_token:
-        return JsonResponse({"action": "error", "message": "unauthorized"}, status=401)
+        return JsonResponse({
+            "action": "error", "open_door": False,
+            "message": "unauthorized"
+        }, status=401)
 
     try:
         data = json.loads(request.body.decode("utf-8"))
     except (json.JSONDecodeError, UnicodeDecodeError):
-        return JsonResponse({"action": "error", "message": "invalid json"}, status=400)
+        return JsonResponse({
+            "action": "error", "open_door": False,
+            "message": "invalid json"
+        }, status=400)
 
     card_uid = (data.get("card") or data.get("uid") or "").strip()
     umbr_uid = (data.get("umbrella_uid") or "").strip()
-    if "box_has_umbrella" in data:
-        box_has = bool(data.get("box_has_umbrella"))
-    else:
-        box_has = True  # по умолчанию — зонт есть
+    box_has  = bool(data.get("box_has_umbrella", True))
 
     if not card_uid:
-        return JsonResponse({"action": "error", "message": "card uid required"}, status=400)
+        return JsonResponse({
+            "action": "error", "open_door": False,
+            "message": "card uid required"
+        }, status=400)
 
     print(f"[api_rent] card={card_uid!r} box={box_has} umbrella={umbr_uid!r}")
 
+    # ─── Карта зарегистрирована? ───
     try:
         user = UserTag.objects.get(pass_tag=card_uid)
     except UserTag.DoesNotExist:
-        return JsonResponse({"action": "error", "message": "card not registered"}, status=404)
+        print(f"  ❌ карта {card_uid} не зарегистрирована — дверь НЕ открыть")
+        return JsonResponse({
+            "action": "error",
+            "open_door": False,                  # 🔒 чужак — не пускаем
+            "message": "card not registered",
+        }, status=404)
 
     with transaction.atomic():
         active = (
@@ -57,6 +70,7 @@ def api_rent(request: HttpRequest) -> JsonResponse:
             .select_related("object").first()
         )
 
+        # ─── 1. ВОЗВРАТ ───
         if active and box_has:
             obj = active.object
             active.returned_at = timezone.now()
@@ -65,18 +79,27 @@ def api_rent(request: HttpRequest) -> JsonResponse:
             if obj.home_cell_id:
                 obj.cell = obj.home_cell
             obj.save(update_fields=["cell", "needs_drying"])
-            print(f"  ✅ ВОЗВРАТ {obj.irf_tag}")
+            print(f"  ✅ ВОЗВРАТ {obj.irf_tag} — 🔓 дверь открыта")
             return JsonResponse({
-                "action": "return", "umbrella": obj.irf_tag,
-                "message": "возврат принят, зонт отправлен на сушку",
+                "action":    "return",
+                "open_door": True,               # 🔓 открыть
+                "umbrella":  obj.irf_tag,
+                "user":      str(user),
+                "message":   "Возврат принят, зонт на сушку",
             })
 
+        # ─── 2. Ждём пока положат зонт в бокс ───
         if active and not box_has:
+            print(f"  ⏳ ждём возврата {active.object.irf_tag} — 🔒 дверь НЕ открыта")
             return JsonResponse({
-                "action": "wait_return", "umbrella": active.object.irf_tag,
-                "message": "положите зонт в бокс",
+                "action":    "wait_return",
+                "open_door": False,              # 🔒 не открываем — пусть кладёт
+                "umbrella":  active.object.irf_tag,
+                "user":      str(user),
+                "message":   "Положите зонт в бокс",
             })
 
+        # ─── 3. ВЫДАЧА ───
         if not active and box_has:
             umbrella = None
             if umbr_uid:
@@ -92,7 +115,13 @@ def api_rent(request: HttpRequest) -> JsonResponse:
                     .order_by("irf_tag").first()
                 )
             if not umbrella:
-                return JsonResponse({"action": "error", "message": "нет свободных зонтов"}, status=409)
+                print(f"  ⚠ нет свободных зонтов — 🔒 дверь НЕ открыта")
+                return JsonResponse({
+                    "action":    "error",
+                    "open_door": False,          # 🔒 нечего выдавать — не открываем
+                    "user":      str(user),
+                    "message":   "Нет свободных зонтов",
+                }, status=409)
 
             if not umbrella.home_cell_id and umbrella.cell_id:
                 umbrella.home_cell = umbrella.cell
@@ -100,18 +129,25 @@ def api_rent(request: HttpRequest) -> JsonResponse:
             umbrella.save(update_fields=["cell", "home_cell"])
 
             Handout.objects.create(object=umbrella, user=user, issued_at=timezone.now())
-            print(f"  ✅ ВЫДАН {umbrella.irf_tag}")
+            print(f"  ✅ ВЫДАН {umbrella.irf_tag} — 🔓 дверь открыта")
             return JsonResponse({
-                "action": "take", "umbrella": umbrella.irf_tag,
-                "message": "зонт выдан",
+                "action":    "take",
+                "open_door": True,               # 🔓 открыть
+                "umbrella":  umbrella.irf_tag,
+                "user":      str(user),
+                "message":   "Зонт выдан",
             })
 
-        return JsonResponse({"action": "empty", "message": "в боксе нет зонта"})
+        # ─── 4. Бокс пустой ───
+        print(f"  ℹ бокс пуст — 🔒 дверь НЕ открыта")
+        return JsonResponse({
+            "action":    "empty",
+            "open_door": False,                  # 🔒 нечего брать
+            "user":      str(user),
+            "message":   "В боксе нет зонта",
+        })
 
-
-# =====================================================================
-#  ШАГ 1: приложили КАРТУ — создаём сессию, ждём зонт
-# =====================================================================
+#  ШАГ 1: приложили КАРТУ - создаём сессию, ждём зонт
 
 @csrf_exempt
 @require_POST
@@ -170,9 +206,7 @@ def api_rent_card(request: HttpRequest) -> JsonResponse:
         })
 
 
-# =====================================================================
-#  ШАГ 2: приложили ЗОНТ — ищем сессию, завершаем операцию
-# =====================================================================
+#  ШАГ 2: приложили ЗОНТ - ищем сессию, завершаем операцию
 
 @csrf_exempt
 @require_POST
@@ -273,6 +307,10 @@ def api_rent_umbrella(request: HttpRequest) -> JsonResponse:
         return JsonResponse({"action": "error", "message": "unknown mode"}, status=400)
 
 
+ # 3. Открытие двери
+ 
+
+
 # =====================================================================
 #  Веб-интерфейс
 # =====================================================================
@@ -371,9 +409,7 @@ def index(request: HttpRequest) -> HttpResponse:
     })
 
 
-# =====================================================================
 #  API: активные выдачи
-# =====================================================================
 
 @require_GET
 def api_active_handouts(request: HttpRequest) -> JsonResponse:
@@ -404,11 +440,11 @@ def api_objects(request: HttpRequest) -> JsonResponse:
     data = []
     for o in objects:
         if o.is_drying:
-            status_code, status_label = "drying", "🌧 сушится"
+            status_code, status_label = "drying", "сушится"
         elif o.needs_drying:
-            status_code, status_label = "queue", "⏳ в очереди"
+            status_code, status_label = "queue", "в очереди"
         elif o.cell_id:
-            status_code, status_label = "ok", "✓ на месте"
+            status_code, status_label = "ok", "на месте"
         else:
             status_code, status_label = "out", "на руках"
 
@@ -425,27 +461,25 @@ def api_objects(request: HttpRequest) -> JsonResponse:
     return JsonResponse({"objects": data})
 
 
-# =====================================================================
-#  Сушилка — ловец запросов ESP
-# =====================================================================
+#  Сушилка - ловит запросов ESP
 
 @csrf_exempt
 def api_dryer_ping(request: HttpRequest, path: str = "") -> JsonResponse:
     """
-    Ловим запросы от ESP сушилки.
+    Ловятся запросы от ESP сушилки.
 
     Стадии:
-      • UID считан + влажность > 80   →  СТАРТ сушки (is_drying=True)
-      • UID считан + 40 < H ≤ 80      →  В ПРОЦЕССЕ (обновляем H, T)
-      • event="finished" ИЛИ H < 40   →  ЗАВЕРШЕНО (is_drying=False)
-      • event="failed"                →  СБОЙ
+      • UID считан + влажность > 80   ->  СТАРТ сушки (is_drying=True)
+      • UID считан + 40 < H ≤ 80      ->  В ПРОЦЕССЕ (обновляем H, T)
+      • event="finished" ИЛИ H < 40   ->  ЗАВЕРШЕНО (is_drying=False)
+      • event="failed"                -> СБОЙ
     """
     HUMIDITY_WET     = 80.0   # > этого — точно мокрый, начинаем сушку
     HUMIDITY_DRY     = 40.0   # < этого — сухой, завершаем
 
     status = DryerStatus.get()
 
-    # ─── Парсим тело запроса ───
+    # Парсим тело запроса 
     raw = ""
     try:
         raw = request.body.decode("utf-8", errors="replace")[:500]
@@ -484,45 +518,45 @@ def api_dryer_ping(request: HttpRequest, path: str = "") -> JsonResponse:
         if m_u: uid   = m_u.group(1).strip()
         if m_e: event = m_e.group(1).strip().lower()
 
-    # ─── Лог входящего запроса ───
+    # Лог входящего запроса 
     print("\n" + "═" * 60)
-    print(f"🌧 DRYER PING  /{path}")
-    print(f"   raw     = {raw[:200]}")
-    print(f"   uid     = {uid!r}")
-    print(f"   H       = {humidity}")
-    print(f"   T       = {temp}")
-    print(f"   event   = {event!r}")
+    print(f"DRYER PING  /{path}")
+    print(f"raw     = {raw[:200]}")
+    print(f"uid     = {uid!r}")
+    print(f"H       = {humidity}")
+    print(f"T       = {temp}")
+    print(f"event   = {event!r}")
     print("─" * 60)
 
-    # ─── Общий статус сушилки ───
+    # Общий статус сушилки 
     if humidity is not None: status.last_humidity = humidity
     if temp     is not None: status.last_temp     = temp
 
-    # ═══════════════ ОБРАБОТКА БЕЗ UID ═══════════════
+    # ОБРАБОТКА БЕЗ UID 
     if not uid:
         if event == "finished":
             cnt = TrackedObject.objects.filter(is_drying=True).update(
                 is_drying=False, last_dried_at=timezone.now()
             )
             status.is_active = False
-            print(f"   📍 СТАДИЯ: ЗАВЕРШЕНО (без UID) — снято {cnt} зонтов")
+            print(f"СТАДИЯ: ЗАВЕРШЕНО (без UID) — снято {cnt} зонтов")
         elif event in ("failed", "idle", "stop"):
             status.is_active = False
-            print(f"   📍 СТАДИЯ: СТОП ({event})")
+            print(f"СТАДИЯ: СТОП ({event})")
         else:
-            # пустой пинг — сушилка просто жива
+            # пустой пинг - сушилка просто жива
             status.is_active = True
-            print(f"   📍 СТАДИЯ: ПИНГ (без UID, ничего не меняем)")
+            print(f"СТАДИЯ: ПИНГ (без UID, ничего не меняем)")
         status.last_raw = f"uid= H={humidity} T={temp} ev={event}"
         status.save()
         print("═" * 60)
         return JsonResponse({"ok": True, "message": "ping", "event": event})
 
-    # ═══════════════ ОБРАБОТКА С UID ═══════════════
+    # ОБРАБОТКА С UID 
     try:
         obj = TrackedObject.objects.get(irf_tag=uid)
     except TrackedObject.DoesNotExist:
-        print(f"   ❌ зонт {uid!r} НЕ найден в БД")
+        print(f"зонт {uid!r} НЕ найден в БД")
         status.is_active = True
         status.last_raw  = f"uid={uid}(unknown) H={humidity} T={temp} ev={event}"
         status.save()
@@ -554,28 +588,28 @@ def api_dryer_ping(request: HttpRequest, path: str = "") -> JsonResponse:
         print(f"   📍 СТАДИЯ: ▶ СТАРТ (event=start, H={humidity})")
 
     else:
-        # event пустой → определяем стадию по влажности
+        # event пустой -> определяем стадию по влажности
         if humidity is None:
             # UID есть, но без замера — просто отмечаем что в сушилке
             obj.is_drying    = True
             obj.needs_drying = True
             status.is_active = True
-            print(f"   📍 СТАДИЯ: вставлен зонт (H неизвестна) — сушим")
+            print(f"   СТАДИЯ: вставлен зонт (H неизвестна) — сушим")
 
         elif humidity > HUMIDITY_WET:
-            # 🎯 МОКРЫЙ → начинаем сушить
+            # МОКРЫЙ → начинаем сушить
             obj.is_drying    = True
             obj.needs_drying = True
             status.is_active = True
-            print(f"   📍 СТАДИЯ: 🌧 СУШИТСЯ  (H={humidity} > {HUMIDITY_WET})")
+            print(f"   СТАДИЯ: СУШИТСЯ  (H={humidity} > {HUMIDITY_WET})")
 
         elif humidity < HUMIDITY_DRY:
-            # 🎯 СУХОЙ → завершаем
+            # СУХОЙ → завершаем
             obj.is_drying     = False
             obj.needs_drying  = False
             obj.last_dried_at = timezone.now()
             status.is_active  = False
-            print(f"   📍 СТАДИЯ: ✅ ВЫСОХ автоматически (H={humidity} < {HUMIDITY_DRY})")
+            print(f"    СТАДИЯ:  ВЫСОХ автоматически (H={humidity} < {HUMIDITY_DRY})")
 
         else:
             # промежуточная зона — продолжаем сушить

@@ -17,6 +17,7 @@ urlpatterns = [
     path("api/objects/",        views.api_objects,           name="api_objects"),
     path("api/dryer/status/",   views.api_dryer_status,      name="api_dryer_status"),
     path("api/dryer/done/",     views.api_dryer_done,        name="api_dryer_done"),
+    path("api/card/check/", views.api_card_check, name="api_card_check"),
 
     re_path(r"^api/dryer/?$",    views.api_dryer_ping, name="api_dryer_ping_1"),
     re_path(r"^api/dry/?$",      views.api_dryer_ping, name="api_dryer_ping_2"),
