@@ -319,7 +319,7 @@
                 const d = await r.json();
                 const tbody = document.getElementById("active-body");
                 if (!d.handouts || d.handouts.length === 0) {
-                    tbody.innerHTML = '<tr><td colspan="5" class="empty">Все зонты на месте 🌤</td></tr>';
+                    tbody.innerHTML = '<tr><td colspan="5" class="empty">Все зонты на месте</td></tr>';
                     return;
                 }
                 tbody.innerHTML = d.handouts.map(h => `
