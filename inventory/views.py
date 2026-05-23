@@ -431,14 +431,26 @@ def api_objects(request: HttpRequest) -> JsonResponse:
 
 @csrf_exempt
 def api_dryer_ping(request: HttpRequest, path: str = "") -> JsonResponse:
-    status = DryerStatus.get()
-    status.is_active = True
+    """
+    Ловим запросы от ESP сушилки.
 
+    Стадии:
+      • UID считан + влажность > 80   →  СТАРТ сушки (is_drying=True)
+      • UID считан + 40 < H ≤ 80      →  В ПРОЦЕССЕ (обновляем H, T)
+      • event="finished" ИЛИ H < 40   →  ЗАВЕРШЕНО (is_drying=False)
+      • event="failed"                →  СБОЙ
+    """
+    HUMIDITY_WET     = 80.0   # > этого — точно мокрый, начинаем сушку
+    HUMIDITY_DRY     = 40.0   # < этого — сухой, завершаем
+
+    status = DryerStatus.get()
+
+    # ─── Парсим тело запроса ───
     raw = ""
     try:
         raw = request.body.decode("utf-8", errors="replace")[:500]
     except Exception:
-        raw = ""
+        pass
 
     humidity, temp, uid, event = None, None, "", ""
 
@@ -454,7 +466,7 @@ def api_dryer_ping(request: HttpRequest, path: str = "") -> JsonResponse:
                 try: temp = float(data["temp"])
                 except (ValueError, TypeError): pass
             uid   = (data.get("uid") or "").strip()
-            event = (data.get("event") or "").strip()
+            event = (data.get("event") or "").strip().lower()
     except Exception:
         parsed = False
 
@@ -462,39 +474,134 @@ def api_dryer_ping(request: HttpRequest, path: str = "") -> JsonResponse:
         m_h = re.search(r"humidity[=:]\s*([\d.]+)", raw)
         m_t = re.search(r"temp[=:]\s*([\d.]+)", raw)
         m_u = re.search(r"uid[=:]\s*([A-Fa-f0-9 :]+)", raw)
+        m_e = re.search(r"event[=:]\s*(\w+)", raw)
         if m_h:
             try: humidity = float(m_h.group(1))
             except ValueError: pass
         if m_t:
             try: temp = float(m_t.group(1))
             except ValueError: pass
-        if m_u: uid = m_u.group(1).strip()
+        if m_u: uid   = m_u.group(1).strip()
+        if m_e: event = m_e.group(1).strip().lower()
 
+    # ─── Лог входящего запроса ───
+    print("\n" + "═" * 60)
+    print(f"🌧 DRYER PING  /{path}")
+    print(f"   raw     = {raw[:200]}")
+    print(f"   uid     = {uid!r}")
+    print(f"   H       = {humidity}")
+    print(f"   T       = {temp}")
+    print(f"   event   = {event!r}")
+    print("─" * 60)
+
+    # ─── Общий статус сушилки ───
     if humidity is not None: status.last_humidity = humidity
     if temp     is not None: status.last_temp     = temp
 
-    if uid:
-        try:
-            obj = TrackedObject.objects.get(irf_tag=uid)
-            obj.is_drying = True
-            if humidity is not None: obj.last_humidity = humidity
-            if temp     is not None: obj.last_temp     = temp
-            if event == "finished":
-                obj.is_drying     = False
-                obj.needs_drying  = False
-                obj.last_dried_at = timezone.now()
-            obj.save(update_fields=[
-                "is_drying", "needs_drying",
-                "last_humidity", "last_temp", "last_dried_at",
-            ])
-        except TrackedObject.DoesNotExist:
-            pass
+    # ═══════════════ ОБРАБОТКА БЕЗ UID ═══════════════
+    if not uid:
+        if event == "finished":
+            cnt = TrackedObject.objects.filter(is_drying=True).update(
+                is_drying=False, last_dried_at=timezone.now()
+            )
+            status.is_active = False
+            print(f"   📍 СТАДИЯ: ЗАВЕРШЕНО (без UID) — снято {cnt} зонтов")
+        elif event in ("failed", "idle", "stop"):
+            status.is_active = False
+            print(f"   📍 СТАДИЯ: СТОП ({event})")
+        else:
+            # пустой пинг — сушилка просто жива
+            status.is_active = True
+            print(f"   📍 СТАДИЯ: ПИНГ (без UID, ничего не меняем)")
+        status.last_raw = f"uid= H={humidity} T={temp} ev={event}"
+        status.save()
+        print("═" * 60)
+        return JsonResponse({"ok": True, "message": "ping", "event": event})
+
+    # ═══════════════ ОБРАБОТКА С UID ═══════════════
+    try:
+        obj = TrackedObject.objects.get(irf_tag=uid)
+    except TrackedObject.DoesNotExist:
+        print(f"   ❌ зонт {uid!r} НЕ найден в БД")
+        status.is_active = True
+        status.last_raw  = f"uid={uid}(unknown) H={humidity} T={temp} ev={event}"
+        status.save()
+        print("═" * 60)
+        return JsonResponse({"ok": False, "message": "umbrella not found"}, status=404)
+
+    # обновляем замеры зонта
+    if humidity is not None: obj.last_humidity = humidity
+    if temp     is not None: obj.last_temp     = temp
+
+    # ─── ЯВНЫЕ EVENT'ы от Arduino ───
+    if event == "finished":
+        obj.is_drying     = False
+        obj.needs_drying  = False
+        obj.last_dried_at = timezone.now()
+        status.is_active  = False
+        print(f"   📍 СТАДИЯ: ✅ ЗАВЕРШЕНО (event=finished)")
+        print(f"            зонт {uid} высох (H={humidity})")
+
+    elif event == "failed":
+        obj.is_drying    = False
+        status.is_active = False
+        print(f"   📍 СТАДИЯ: ❌ СБОЙ (event=failed)")
+
+    elif event == "start":
+        obj.is_drying    = True
+        obj.needs_drying = True
+        status.is_active = True
+        print(f"   📍 СТАДИЯ: ▶ СТАРТ (event=start, H={humidity})")
+
+    else:
+        # event пустой → определяем стадию по влажности
+        if humidity is None:
+            # UID есть, но без замера — просто отмечаем что в сушилке
+            obj.is_drying    = True
+            obj.needs_drying = True
+            status.is_active = True
+            print(f"   📍 СТАДИЯ: вставлен зонт (H неизвестна) — сушим")
+
+        elif humidity > HUMIDITY_WET:
+            # 🎯 МОКРЫЙ → начинаем сушить
+            obj.is_drying    = True
+            obj.needs_drying = True
+            status.is_active = True
+            print(f"   📍 СТАДИЯ: 🌧 СУШИТСЯ  (H={humidity} > {HUMIDITY_WET})")
+
+        elif humidity < HUMIDITY_DRY:
+            # 🎯 СУХОЙ → завершаем
+            obj.is_drying     = False
+            obj.needs_drying  = False
+            obj.last_dried_at = timezone.now()
+            status.is_active  = False
+            print(f"   📍 СТАДИЯ: ✅ ВЫСОХ автоматически (H={humidity} < {HUMIDITY_DRY})")
+
+        else:
+            # промежуточная зона — продолжаем сушить
+            obj.is_drying    = True
+            obj.needs_drying = True
+            status.is_active = True
+            print(f"   📍 СТАДИЯ: 🔄 в процессе (H={humidity}, T={temp})")
+
+    obj.save(update_fields=[
+        "is_drying", "needs_drying",
+        "last_humidity", "last_temp", "last_dried_at",
+    ])
 
     status.last_raw = f"uid={uid} H={humidity} T={temp} ev={event}"
     status.save()
 
-    print(f"🌧 DRYER: {request.method} /{path} uid={uid!r} H={humidity} T={temp} ev={event!r}")
-    return JsonResponse({"ok": True, "message": "caught", "umbrella": uid or None})
+    print(f"   💾 saved: is_drying={obj.is_drying} needs_drying={obj.needs_drying}")
+    print("═" * 60)
+
+    return JsonResponse({
+        "ok":       True,
+        "umbrella": uid,
+        "event":    event,
+        "humidity": humidity,
+        "temp":     temp,
+    })
 
 
 # =====================================================================
