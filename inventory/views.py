@@ -16,10 +16,6 @@ from django.views.decorators.http import require_POST, require_GET
 from .models import Cell, Handout, TrackedObject, UserTag, DryerStatus, RentSession
 
 
-# =====================================================================
-#  ОДНИМ ЗАПРОСОМ (совместимость со старой схемой)
-# =====================================================================
-
 @csrf_exempt
 @require_POST
 @csrf_exempt
@@ -52,7 +48,7 @@ def api_rent(request: HttpRequest) -> JsonResponse:
 
     print(f"[api_rent] card={card_uid!r} box={box_has} umbrella={umbr_uid!r}")
 
-    # ─── Карта зарегистрирована? ───
+    #   Карта зарегистрирована?  
     try:
         user = UserTag.objects.get(pass_tag=card_uid)
     except UserTag.DoesNotExist:
@@ -70,7 +66,7 @@ def api_rent(request: HttpRequest) -> JsonResponse:
             .select_related("object").first()
         )
 
-        # ─── 1. ВОЗВРАТ ───
+        #   1. ВОЗВРАТ 
         if active and box_has:
             obj = active.object
             active.returned_at = timezone.now()
@@ -88,7 +84,7 @@ def api_rent(request: HttpRequest) -> JsonResponse:
                 "message":   "Возврат принят, зонт на сушку",
             })
 
-        # ─── 2. Ждём пока положат зонт в бокс ───
+        #   2. Ждём пока положат зонт в бокс  
         if active and not box_has:
             print(f"  ⏳ ждём возврата {active.object.irf_tag} — 🔒 дверь НЕ открыта")
             return JsonResponse({
@@ -99,7 +95,7 @@ def api_rent(request: HttpRequest) -> JsonResponse:
                 "message":   "Положите зонт в бокс",
             })
 
-        # ─── 3. ВЫДАЧА ───
+        # 3. ВЫДАЧА  
         if not active and box_has:
             umbrella = None
             if umbr_uid:
@@ -138,7 +134,7 @@ def api_rent(request: HttpRequest) -> JsonResponse:
                 "message":   "Зонт выдан",
             })
 
-        # ─── 4. Бокс пустой ───
+        #   4. Бокс пустой  
         print(f"  ℹ бокс пуст — 🔒 дверь НЕ открыта")
         return JsonResponse({
             "action":    "empty",
@@ -245,7 +241,7 @@ def api_rent_umbrella(request: HttpRequest) -> JsonResponse:
         user = session.user
         mode = session.mode
 
-        # ─── ВЫДАЧА ───
+        #   ВЫДАЧА  
         if mode == "take":
             if Handout.objects.filter(object=umbrella, returned_at__isnull=True).exists():
                 session.delete()
@@ -268,7 +264,7 @@ def api_rent_umbrella(request: HttpRequest) -> JsonResponse:
                 "message":  "зонт выдан",
             })
 
-        # ─── ВОЗВРАТ ───
+        #   ВОЗВРАТ  
         if mode == "return":
             active = (
                 Handout.objects.select_for_update()
@@ -567,7 +563,7 @@ def api_dryer_ping(request: HttpRequest, path: str = "") -> JsonResponse:
     if humidity is not None: obj.last_humidity = humidity
     if temp     is not None: obj.last_temp     = temp
 
-    # ─── ЯВНЫЕ EVENT'ы от Arduino ───
+    #   ЯВНЫЕ EVENT'ы от Arduino  
     if event == "finished":
         obj.is_drying     = False
         obj.needs_drying  = False
