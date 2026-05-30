@@ -18,6 +18,78 @@ from django.views.decorators.http import require_POST, require_GET
 from .models import Cell, Handout, TrackedObject, UserTag, DryerStatus, RentSession
 
 
+def _parse_box_has(data: dict) -> bool | None:
+    """None — датчик не передал; True/False — явное значение."""
+    if "box_has_umbrella" not in data:
+        return None
+    return bool(data.get("box_has_umbrella"))
+
+
+def _get_umbrella_by_tag(tag: str) -> TrackedObject | None:
+    tag = (tag or "").strip()
+    if not tag:
+        return None
+    obj = TrackedObject.objects.filter(irf_tag=tag).first()
+    if obj:
+        return obj
+    compact = re.sub(r"\s+", "", tag).upper()
+    for candidate in TrackedObject.objects.only("id", "irf_tag"):
+        if re.sub(r"\s+", "", candidate.irf_tag).upper() == compact:
+            return TrackedObject.objects.filter(pk=candidate.pk).first()
+    return None
+
+
+def _available_umbrellas_qs():
+    """Зонты в ячейке, готовые к выдаче."""
+    open_h = Handout.objects.filter(object=OuterRef("pk"), returned_at__isnull=True)
+    return (
+        TrackedObject.objects.filter(
+            cell__isnull=False,
+            is_drying=False,
+            needs_drying=False,
+        )
+        .annotate(has_open=Exists(open_h))
+        .filter(has_open=False)
+        .order_by("irf_tag")
+    )
+
+
+def _issue_block_reason(umbrella: TrackedObject) -> str | None:
+    if Handout.objects.filter(object=umbrella, returned_at__isnull=True).exists():
+        return "already_out"
+    if umbrella.is_drying or umbrella.needs_drying:
+        return "not_ready"
+    if not umbrella.cell_id:
+        return "not_in_station"
+    return None
+
+
+def _api_error(
+    message: str,
+    *,
+    error_code: str,
+    status: int = 400,
+    open_door: bool = False,
+    **extra,
+) -> JsonResponse:
+    payload = {
+        "action": "error",
+        "open_door": open_door,
+        "message": message,
+        "error_code": error_code,
+    }
+    payload.update(extra)
+    return JsonResponse(payload, status=status)
+
+
+def _issue_umbrella(umbrella: TrackedObject, user: UserTag) -> None:
+    if not umbrella.home_cell_id and umbrella.cell_id:
+        umbrella.home_cell = umbrella.cell
+    umbrella.cell = None
+    umbrella.save(update_fields=["cell", "home_cell"])
+    Handout.objects.create(object=umbrella, user=user, issued_at=timezone.now())
+
+
 @csrf_exempt
 @require_POST
 @csrf_exempt
@@ -39,8 +111,10 @@ def api_rent(request: HttpRequest) -> JsonResponse:
         }, status=400)
 
     card_uid = (data.get("card") or data.get("uid") or "").strip()
-    umbr_uid = (data.get("umbrella_uid") or "").strip()
-    box_has  = bool(data.get("box_has_umbrella", True))
+    umbr_uid = (
+        data.get("umbrella_uid") or data.get("umbrella") or data.get("uid_umbrella") or ""
+    ).strip()
+    box_has = _parse_box_has(data)
 
     if not card_uid:
         return JsonResponse({
@@ -68,8 +142,8 @@ def api_rent(request: HttpRequest) -> JsonResponse:
             .select_related("object").first()
         )
 
-        #   1. ВОЗВРАТ 
-        if active and box_has:
+        #   1. ВОЗВРАТ
+        if active and box_has is True:
             obj = active.object
             active.returned_at = timezone.now()
             active.save(update_fields=["returned_at"])
@@ -86,8 +160,8 @@ def api_rent(request: HttpRequest) -> JsonResponse:
                 "message":   "Возврат принят, зонт на сушку",
             })
 
-        #   2. Ждём пока положат зонт в бокс  
-        if active and not box_has:
+        #   2. Ждём пока положат зонт в бокс
+        if active and box_has is not True:
             print(f"  ⏳ ждём возврата {active.object.irf_tag} — 🔒 дверь НЕ открыта")
             return JsonResponse({
                 "action":    "wait_return",
@@ -97,53 +171,89 @@ def api_rent(request: HttpRequest) -> JsonResponse:
                 "message":   "Положите зонт в бокс",
             })
 
-        # 3. ВЫДАЧА  
-        if not active and box_has:
-            umbrella = None
+        # 3. ВЫДАЧА
+        if not active:
             if umbr_uid:
-                try:
-                    umbrella = TrackedObject.objects.get(irf_tag=umbr_uid)
-                except TrackedObject.DoesNotExist:
-                    pass
-            if not umbrella:
-                open_h = Handout.objects.filter(object=OuterRef('pk'), returned_at__isnull=True)
-                umbrella = (
-                    TrackedObject.objects.filter(cell__isnull=False)
-                    .annotate(has_open=Exists(open_h)).filter(has_open=False)
-                    .order_by("irf_tag").first()
-                )
-            if not umbrella:
-                print(f"  ⚠ нет свободных зонтов — 🔒 дверь НЕ открыта")
+                umbrella = _get_umbrella_by_tag(umbr_uid)
+                if not umbrella:
+                    print(f"  ⚠ зонт {umbr_uid!r} не в базе")
+                    return _api_error(
+                        "Зонт не зарегистрирован",
+                        error_code="umbrella_not_found",
+                        status=404,
+                        user=str(user),
+                    )
+                block = _issue_block_reason(umbrella)
+                if block == "already_out":
+                    return _api_error(
+                        "Этот зонт уже выдан",
+                        error_code="already_out",
+                        status=400,
+                        user=str(user),
+                    )
+                if block == "not_ready":
+                    return _api_error(
+                        "Зонт ещё сохнет, подождите",
+                        error_code="not_ready",
+                        status=400,
+                        user=str(user),
+                    )
+                if block == "not_in_station":
+                    return _api_error(
+                        "Зонт не в стойке",
+                        error_code="not_in_station",
+                        status=400,
+                        user=str(user),
+                    )
+                _issue_umbrella(umbrella, user)
+                print(f"  ✅ ВЫДАН {umbrella.irf_tag} — 🔓 дверь открыта")
                 return JsonResponse({
-                    "action":    "error",
-                    "open_door": False,          # 🔒 нечего выдавать — не открываем
-                    "user":      str(user),
-                    "message":   "Нет свободных зонтов",
-                }, status=409)
+                    "action": "take",
+                    "open_door": True,
+                    "umbrella": umbrella.irf_tag,
+                    "user": str(user),
+                    "message": "Зонт выдан",
+                })
 
-            if not umbrella.home_cell_id and umbrella.cell_id:
-                umbrella.home_cell = umbrella.cell
-            umbrella.cell = None
-            umbrella.save(update_fields=["cell", "home_cell"])
+            if box_has is True:
+                umbrella = _available_umbrellas_qs().first()
+                if not umbrella:
+                    print(f"  ⚠ нет свободных зонтов — 🔒 дверь НЕ открыта")
+                    return _api_error(
+                        "Нет свободных зонтов",
+                        error_code="no_umbrellas",
+                        status=409,
+                        user=str(user),
+                    )
+                _issue_umbrella(umbrella, user)
+                print(f"  ✅ ВЫДАН {umbrella.irf_tag} — 🔓 дверь открыта")
+                return JsonResponse({
+                    "action": "take",
+                    "open_door": True,
+                    "umbrella": umbrella.irf_tag,
+                    "user": str(user),
+                    "message": "Зонт выдан",
+                })
 
-            Handout.objects.create(object=umbrella, user=user, issued_at=timezone.now())
-            print(f"  ✅ ВЫДАН {umbrella.irf_tag} — 🔓 дверь открыта")
+            if box_has is False:
+                print(f"  ℹ бокс пуст — 🔒 дверь НЕ открыта")
+                return JsonResponse({
+                    "action": "empty",
+                    "open_door": False,
+                    "user": str(user),
+                    "message": "В боксе нет зонта",
+                    "error_code": "box_empty",
+                })
+
+            print(f"  → ждём метку зонта (карта уже есть)")
             return JsonResponse({
-                "action":    "take",
-                "open_door": True,               # 🔓 открыть
-                "umbrella":  umbrella.irf_tag,
-                "user":      str(user),
-                "message":   "Зонт выдан",
+                "action": "wait_umbrella",
+                "open_door": False,
+                "mode": "take",
+                "user": str(user),
+                "message": "Приложите зонт для выдачи",
+                "available": _available_umbrellas_qs().count(),
             })
-
-        #   4. Бокс пустой  
-        print(f"  ℹ бокс пуст — 🔒 дверь НЕ открыта")
-        return JsonResponse({
-            "action":    "empty",
-            "open_door": False,                  # 🔒 нечего брать
-            "user":      str(user),
-            "message":   "В боксе нет зонта",
-        })
 
 #  ШАГ 1: приложили КАРТУ - создаём сессию, ждём зонт
 
@@ -196,11 +306,20 @@ def api_rent_card(request: HttpRequest) -> JsonResponse:
             "umbrella": umbrella_tag,
         })
     else:
-        print(f"  → ждём зонт для ВЫДАЧИ")
+        available = _available_umbrellas_qs().count()
+        if available == 0:
+            print(f"  ⚠ нет свободных зонтов (card)")
+            return _api_error(
+                "Нет свободных зонтов",
+                error_code="no_umbrellas",
+                status=409,
+            )
+        print(f"  → ждём зонт для ВЫДАЧИ ({available} доступно)")
         return JsonResponse({
-            "action":  "wait_umbrella",
-            "mode":    "take",
+            "action": "wait_umbrella",
+            "mode": "take",
             "message": "приложите зонт для выдачи",
+            "available": available,
         })
 
 
@@ -224,10 +343,13 @@ def api_rent_umbrella(request: HttpRequest) -> JsonResponse:
 
     print(f"[api_rent_umbrella] umbrella={umbrella_uid!r}")
 
-    try:
-        umbrella = TrackedObject.objects.get(irf_tag=umbrella_uid)
-    except TrackedObject.DoesNotExist:
-        return JsonResponse({"action": "error", "message": "umbrella not registered"}, status=404)
+    umbrella = _get_umbrella_by_tag(umbrella_uid)
+    if not umbrella:
+        return _api_error(
+            "Зонт не зарегистрирован",
+            error_code="umbrella_not_found",
+            status=404,
+        )
 
     cutoff = timezone.now() - timezone.timedelta(seconds=30)
     RentSession.objects.filter(created_at__lt=cutoff).delete()
@@ -235,35 +357,49 @@ def api_rent_umbrella(request: HttpRequest) -> JsonResponse:
     with transaction.atomic():
         session = RentSession.objects.select_for_update().order_by("-created_at").first()
         if not session:
-            return JsonResponse({
-                "action":  "error",
-                "message": "сначала приложите карту",
-            }, status=409)
+            return _api_error(
+                "Сначала приложите карту",
+                error_code="need_card_first",
+                status=400,
+            )
 
         user = session.user
         mode = session.mode
 
         #   ВЫДАЧА  
         if mode == "take":
-            if Handout.objects.filter(object=umbrella, returned_at__isnull=True).exists():
+            block = _issue_block_reason(umbrella)
+            if block == "already_out":
                 session.delete()
-                return JsonResponse({
-                    "action": "error", "message": "этот зонт уже на руках",
-                }, status=409)
+                return _api_error(
+                    "Этот зонт уже выдан",
+                    error_code="already_out",
+                    status=400,
+                )
+            if block == "not_ready":
+                session.delete()
+                return _api_error(
+                    "Зонт ещё сохнет, подождите",
+                    error_code="not_ready",
+                    status=400,
+                )
+            if block == "not_in_station":
+                session.delete()
+                return _api_error(
+                    "Зонт не в стойке",
+                    error_code="not_in_station",
+                    status=400,
+                )
 
-            if not umbrella.home_cell_id and umbrella.cell_id:
-                umbrella.home_cell = umbrella.cell
-            umbrella.cell = None
-            umbrella.save(update_fields=["cell", "home_cell"])
-
-            Handout.objects.create(object=umbrella, user=user, issued_at=timezone.now())
+            _issue_umbrella(umbrella, user)
             session.delete()
 
             print(f"  ✅ ВЫДАН {umbrella.irf_tag} → {user.pass_tag}")
             return JsonResponse({
-                "action":   "take",
+                "action": "take",
+                "open_door": True,
                 "umbrella": umbrella.irf_tag,
-                "message":  "зонт выдан",
+                "message": "зонт выдан",
             })
 
         #   ВОЗВРАТ  
@@ -274,15 +410,18 @@ def api_rent_umbrella(request: HttpRequest) -> JsonResponse:
             )
             if not active:
                 session.delete()
-                return JsonResponse({
-                    "action": "error", "message": "у клиента нет активной выдачи",
-                }, status=409)
+                return _api_error(
+                    "У клиента нет активной выдачи",
+                    error_code="no_active_handout",
+                    status=400,
+                )
 
             if active.object_id != umbrella.id:
-                return JsonResponse({
-                    "action": "error",
-                    "message": f"ожидали зонт {active.object.irf_tag}, получен {umbrella.irf_tag}",
-                }, status=409)
+                return _api_error(
+                    f"Ожидали зонт {active.object.irf_tag}, получен {umbrella.irf_tag}",
+                    error_code="wrong_umbrella",
+                    status=400,
+                )
 
             active.returned_at = timezone.now()
             active.save(update_fields=["returned_at"])
@@ -296,9 +435,10 @@ def api_rent_umbrella(request: HttpRequest) -> JsonResponse:
 
             print(f"  ✅ ВОЗВРАТ {umbrella.irf_tag}")
             return JsonResponse({
-                "action":   "return",
+                "action": "return",
+                "open_door": True,
                 "umbrella": umbrella.irf_tag,
-                "message":  "возврат принят, зонт отправлен на сушку",
+                "message": "возврат принят, зонт отправлен на сушку",
             })
 
         session.delete()
