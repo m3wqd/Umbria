@@ -18,13 +18,6 @@ from django.views.decorators.http import require_POST, require_GET
 from .models import Cell, Handout, TrackedObject, UserTag, DryerStatus, RentSession
 
 
-def _parse_box_has(data: dict) -> bool | None:
-    """None — датчик не передал; True/False — явное значение."""
-    if "box_has_umbrella" not in data:
-        return None
-    return bool(data.get("box_has_umbrella"))
-
-
 def _get_umbrella_by_tag(tag: str) -> TrackedObject | None:
     tag = (tag or "").strip()
     if not tag:
@@ -54,32 +47,80 @@ def _available_umbrellas_qs():
     )
 
 
-def _issue_block_reason(umbrella: TrackedObject) -> str | None:
-    if Handout.objects.filter(object=umbrella, returned_at__isnull=True).exists():
-        return "already_out"
-    if umbrella.is_drying or umbrella.needs_drying:
-        return "not_ready"
-    if not umbrella.cell_id:
-        return "not_in_station"
-    return None
-
-
 def _api_error(
     message: str,
     *,
     error_code: str,
     status: int = 400,
     open_door: bool = False,
+    sound: int = 0,
     **extra,
 ) -> JsonResponse:
+    """sound=0 — без озвучки; sound=5 — только «нет свободных зонтов»."""
     payload = {
         "action": "error",
         "open_door": open_door,
         "message": message,
         "error_code": error_code,
+        "sound": sound,
     }
     payload.update(extra)
     return JsonResponse(payload, status=status)
+
+
+def _api_json(payload: dict, *, status: int = 200) -> JsonResponse:
+    payload.setdefault("sound", 0)
+    return JsonResponse(payload, status=status)
+
+
+def _api_rent_start_session(card_uid: str) -> JsonResponse:
+    """
+    Шаг 1: приложили карту. Статус зонтов не меняем — только сессия и wait_umbrella.
+    Так ожидает прошивка стойки (звук 5 не должен играть на этом шаге).
+    """
+    try:
+        user = UserTag.objects.get(pass_tag=card_uid)
+    except UserTag.DoesNotExist:
+        print(f"  ❌ карта {card_uid!r} не зарегистрирована")
+        return _api_error(
+            "Карта не зарегистрирована",
+            error_code="card_not_registered",
+            status=404,
+        )
+
+    cutoff = timezone.now() - timezone.timedelta(seconds=30)
+    RentSession.objects.filter(created_at__lt=cutoff).delete()
+
+    has_umbrella = Handout.objects.filter(user=user, returned_at__isnull=True).exists()
+    mode = "return" if has_umbrella else "take"
+
+    RentSession.objects.filter(user=user).delete()
+    RentSession.objects.create(user=user, mode=mode)
+
+    if mode == "return":
+        active = (
+            Handout.objects.filter(user=user, returned_at__isnull=True)
+            .select_related("object").first()
+        )
+        umbrella_tag = active.object.irf_tag if active else ""
+        print(f"  → сессия RETURN, ждём зонт {umbrella_tag!r}")
+        return _api_json({
+            "action": "wait_umbrella",
+            "open_door": False,
+            "mode": "return",
+            "message": "Приложите зонт для возврата",
+            "umbrella": umbrella_tag,
+        })
+
+    available = _available_umbrellas_qs().count()
+    print(f"  → сессия TAKE, ждём зонт (в базе доступно: {available})")
+    return _api_json({
+        "action": "wait_umbrella",
+        "open_door": False,
+        "mode": "take",
+        "message": "Приложите зонт для выдачи",
+        "available": available,
+    })
 
 
 def _issue_umbrella(umbrella: TrackedObject, user: UserTag) -> None:
@@ -92,235 +133,43 @@ def _issue_umbrella(umbrella: TrackedObject, user: UserTag) -> None:
 
 @csrf_exempt
 @require_POST
-@csrf_exempt
 def api_rent(request: HttpRequest) -> JsonResponse:
-    """Аренда/возврат + команда открыть дверь."""
+    """Шаг 1 (совместимость): приложили карту → wait_umbrella, без выдачи и без звука 5."""
     expected_token = getattr(settings, "ARDUINO_TOKEN", None)
     if expected_token and request.headers.get("X-Device-Token") != expected_token:
-        return JsonResponse({
-            "action": "error", "open_door": False,
-            "message": "unauthorized"
-        }, status=401)
+        return _api_error("unauthorized", error_code="unauthorized", status=401)
 
     try:
         data = json.loads(request.body.decode("utf-8"))
     except (json.JSONDecodeError, UnicodeDecodeError):
-        return JsonResponse({
-            "action": "error", "open_door": False,
-            "message": "invalid json"
-        }, status=400)
+        return _api_error("invalid json", error_code="invalid_json", status=400)
 
     card_uid = (data.get("card") or data.get("uid") or "").strip()
-    umbr_uid = (
-        data.get("umbrella_uid") or data.get("umbrella") or data.get("uid_umbrella") or ""
-    ).strip()
-    box_has = _parse_box_has(data)
-
     if not card_uid:
-        return JsonResponse({
-            "action": "error", "open_door": False,
-            "message": "card uid required"
-        }, status=400)
+        return _api_error("card uid required", error_code="card_required", status=400)
 
-    print(f"[api_rent] card={card_uid!r} box={box_has} umbrella={umbr_uid!r}")
+    print(f"[api_rent] карта {card_uid!r} → сессия")
+    return _api_rent_start_session(card_uid)
 
-    #   Карта зарегистрирована?  
-    try:
-        user = UserTag.objects.get(pass_tag=card_uid)
-    except UserTag.DoesNotExist:
-        print(f"  ❌ карта {card_uid} не зарегистрирована — дверь НЕ открыть")
-        return JsonResponse({
-            "action": "error",
-            "open_door": False,                  # 🔒 чужак — не пускаем
-            "message": "card not registered",
-        }, status=404)
-
-    with transaction.atomic():
-        active = (
-            Handout.objects.select_for_update()
-            .filter(user=user, returned_at__isnull=True)
-            .select_related("object").first()
-        )
-
-        #   1. ВОЗВРАТ
-        if active and box_has is True:
-            obj = active.object
-            active.returned_at = timezone.now()
-            active.save(update_fields=["returned_at"])
-            obj.needs_drying = True
-            if obj.home_cell_id:
-                obj.cell = obj.home_cell
-            obj.save(update_fields=["cell", "needs_drying"])
-            print(f"  ✅ ВОЗВРАТ {obj.irf_tag} — 🔓 дверь открыта")
-            return JsonResponse({
-                "action":    "return",
-                "open_door": True,               # 🔓 открыть
-                "umbrella":  obj.irf_tag,
-                "user":      str(user),
-                "message":   "Возврат принят, зонт на сушку",
-            })
-
-        #   2. Ждём пока положат зонт в бокс
-        if active and box_has is not True:
-            print(f"  ⏳ ждём возврата {active.object.irf_tag} — 🔒 дверь НЕ открыта")
-            return JsonResponse({
-                "action":    "wait_return",
-                "open_door": False,              # 🔒 не открываем — пусть кладёт
-                "umbrella":  active.object.irf_tag,
-                "user":      str(user),
-                "message":   "Положите зонт в бокс",
-            })
-
-        # 3. ВЫДАЧА
-        if not active:
-            if umbr_uid:
-                umbrella = _get_umbrella_by_tag(umbr_uid)
-                if not umbrella:
-                    print(f"  ⚠ зонт {umbr_uid!r} не в базе")
-                    return _api_error(
-                        "Зонт не зарегистрирован",
-                        error_code="umbrella_not_found",
-                        status=404,
-                        user=str(user),
-                    )
-                block = _issue_block_reason(umbrella)
-                if block == "already_out":
-                    return _api_error(
-                        "Этот зонт уже выдан",
-                        error_code="already_out",
-                        status=400,
-                        user=str(user),
-                    )
-                if block == "not_ready":
-                    return _api_error(
-                        "Зонт ещё сохнет, подождите",
-                        error_code="not_ready",
-                        status=400,
-                        user=str(user),
-                    )
-                if block == "not_in_station":
-                    return _api_error(
-                        "Зонт не в стойке",
-                        error_code="not_in_station",
-                        status=400,
-                        user=str(user),
-                    )
-                _issue_umbrella(umbrella, user)
-                print(f"  ✅ ВЫДАН {umbrella.irf_tag} — 🔓 дверь открыта")
-                return JsonResponse({
-                    "action": "take",
-                    "open_door": True,
-                    "umbrella": umbrella.irf_tag,
-                    "user": str(user),
-                    "message": "Зонт выдан",
-                })
-
-            if box_has is True:
-                umbrella = _available_umbrellas_qs().first()
-                if not umbrella:
-                    print(f"  ⚠ нет свободных зонтов — 🔒 дверь НЕ открыта")
-                    return _api_error(
-                        "Нет свободных зонтов",
-                        error_code="no_umbrellas",
-                        status=409,
-                        user=str(user),
-                    )
-                _issue_umbrella(umbrella, user)
-                print(f"  ✅ ВЫДАН {umbrella.irf_tag} — 🔓 дверь открыта")
-                return JsonResponse({
-                    "action": "take",
-                    "open_door": True,
-                    "umbrella": umbrella.irf_tag,
-                    "user": str(user),
-                    "message": "Зонт выдан",
-                })
-
-            if box_has is False:
-                print(f"  ℹ бокс пуст — 🔒 дверь НЕ открыта")
-                return JsonResponse({
-                    "action": "empty",
-                    "open_door": False,
-                    "user": str(user),
-                    "message": "В боксе нет зонта",
-                    "error_code": "box_empty",
-                })
-
-            print(f"  → ждём метку зонта (карта уже есть)")
-            return JsonResponse({
-                "action": "wait_umbrella",
-                "open_door": False,
-                "mode": "take",
-                "user": str(user),
-                "message": "Приложите зонт для выдачи",
-                "available": _available_umbrellas_qs().count(),
-            })
-
-#  ШАГ 1: приложили КАРТУ - создаём сессию, ждём зонт
 
 @csrf_exempt
 @require_POST
 def api_rent_card(request: HttpRequest) -> JsonResponse:
     expected_token = getattr(settings, "ARDUINO_TOKEN", None)
     if expected_token and request.headers.get("X-Device-Token") != expected_token:
-        return JsonResponse({"action": "error", "message": "unauthorized"}, status=401)
+        return _api_error("unauthorized", error_code="unauthorized", status=401)
 
     try:
         data = json.loads(request.body.decode("utf-8"))
     except (json.JSONDecodeError, UnicodeDecodeError):
-        return JsonResponse({"action": "error", "message": "invalid json"}, status=400)
+        return _api_error("invalid json", error_code="invalid_json", status=400)
 
     card_uid = (data.get("card") or data.get("uid") or "").strip()
     if not card_uid:
-        return JsonResponse({"action": "error", "message": "card uid required"}, status=400)
+        return _api_error("card uid required", error_code="card_required", status=400)
 
-    print(f"[api_rent_card] card={card_uid!r}")
-
-    try:
-        user = UserTag.objects.get(pass_tag=card_uid)
-    except UserTag.DoesNotExist:
-        return JsonResponse({"action": "error", "message": "card not registered"}, status=404)
-
-    # чистим просроченные сессии (старше 30 сек)
-    cutoff = timezone.now() - timezone.timedelta(seconds=30)
-    RentSession.objects.filter(created_at__lt=cutoff).delete()
-
-    # есть ли у клиента зонт на руках?
-    has_umbrella = Handout.objects.filter(user=user, returned_at__isnull=True).exists()
-    mode = "return" if has_umbrella else "take"
-
-    # создаём свежую сессию (удаляем старые этого клиента)
-    RentSession.objects.filter(user=user).delete()
-    RentSession.objects.create(user=user, mode=mode)
-
-    if mode == "return":
-        active = (
-            Handout.objects.filter(user=user, returned_at__isnull=True)
-            .select_related("object").first()
-        )
-        umbrella_tag = active.object.irf_tag if active else ""
-        print(f"  → ждём ВОЗВРАТ зонта {umbrella_tag}")
-        return JsonResponse({
-            "action":   "wait_umbrella",
-            "mode":     "return",
-            "message":  "приложите зонт для возврата",
-            "umbrella": umbrella_tag,
-        })
-    else:
-        available = _available_umbrellas_qs().count()
-        if available == 0:
-            print(f"  ⚠ нет свободных зонтов (card)")
-            return _api_error(
-                "Нет свободных зонтов",
-                error_code="no_umbrellas",
-                status=409,
-            )
-        print(f"  → ждём зонт для ВЫДАЧИ ({available} доступно)")
-        return JsonResponse({
-            "action": "wait_umbrella",
-            "mode": "take",
-            "message": "приложите зонт для выдачи",
-            "available": available,
-        })
+    print(f"[api_rent_card] карта {card_uid!r} → сессия")
+    return _api_rent_start_session(card_uid)
 
 
 #  ШАГ 2: приложили ЗОНТ - ищем сессию, завершаем операцию
@@ -366,28 +215,27 @@ def api_rent_umbrella(request: HttpRequest) -> JsonResponse:
         user = session.user
         mode = session.mode
 
-        #   ВЫДАЧА  
+        #   ВЫДАЧА — по метке зонта, который приложили к считывателю
         if mode == "take":
-            block = _issue_block_reason(umbrella)
-            if block == "already_out":
+            if Handout.objects.filter(object=umbrella, returned_at__isnull=True).exists():
                 session.delete()
                 return _api_error(
                     "Этот зонт уже выдан",
                     error_code="already_out",
                     status=400,
                 )
-            if block == "not_ready":
+            if umbrella.is_drying:
                 session.delete()
                 return _api_error(
-                    "Зонт ещё сохнет, подождите",
-                    error_code="not_ready",
+                    "Зонт в сушилке",
+                    error_code="is_drying",
                     status=400,
                 )
-            if block == "not_in_station":
+            if umbrella.needs_drying and umbrella.cell_id:
                 session.delete()
                 return _api_error(
-                    "Зонт не в стойке",
-                    error_code="not_in_station",
+                    "Зонт ещё не готов к выдаче",
+                    error_code="not_ready",
                     status=400,
                 )
 
@@ -395,11 +243,11 @@ def api_rent_umbrella(request: HttpRequest) -> JsonResponse:
             session.delete()
 
             print(f"  ✅ ВЫДАН {umbrella.irf_tag} → {user.pass_tag}")
-            return JsonResponse({
+            return _api_json({
                 "action": "take",
                 "open_door": True,
                 "umbrella": umbrella.irf_tag,
-                "message": "зонт выдан",
+                "message": "Зонт выдан",
             })
 
         #   ВОЗВРАТ  
@@ -434,11 +282,11 @@ def api_rent_umbrella(request: HttpRequest) -> JsonResponse:
             session.delete()
 
             print(f"  ✅ ВОЗВРАТ {umbrella.irf_tag}")
-            return JsonResponse({
+            return _api_json({
                 "action": "return",
                 "open_door": True,
                 "umbrella": umbrella.irf_tag,
-                "message": "возврат принят, зонт отправлен на сушку",
+                "message": "Возврат принят, зонт на сушку",
             })
 
         session.delete()
