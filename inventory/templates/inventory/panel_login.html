@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Вход — Umbria</title>
+    <link rel="icon" href="/inventory/image/umbrella.png" type="image/x-icon">
+    <style>
+        :root {
+            --ink: #152028;
+            --ink-soft: #4a5d6b;
+            --paper: #f7f5f0;
+            --card: #fff;
+            --line: #d9e0e6;
+            --rain: #2a6f7a;
+            --rain-hover: #1f5861;
+            --font: "Segoe UI", system-ui, sans-serif;
+        }
+        * { box-sizing: border-box; }
+        body {
+            margin: 0;
+            min-height: 100vh;
+            font-family: var(--font);
+            display: grid;
+            place-items: center;
+            background: var(--paper);
+            color: var(--ink);
+            padding: 20px;
+        }
+        .card {
+            width: 100%;
+            max-width: 380px;
+            background: var(--card);
+            border: 1px solid var(--line);
+            border-radius: 12px;
+            padding: 32px 28px;
+            box-shadow: 0 8px 30px rgba(21, 32, 40, 0.08);
+        }
+        h1 {
+            margin: 0 0 6px;
+            font-size: 1.35rem;
+            font-weight: 700;
+        }
+        .sub {
+            margin: 0 0 24px;
+            font-size: 0.9rem;
+            color: var(--ink-soft);
+        }
+        label {
+            display: block;
+            font-size: 0.8rem;
+            font-weight: 500;
+            color: var(--ink-soft);
+            margin-bottom: 5px;
+        }
+        input {
+            width: 100%;
+            padding: 10px 12px;
+            border: 1px solid var(--line);
+            border-radius: 8px;
+            font: inherit;
+            margin-bottom: 14px;
+        }
+        input:focus {
+            outline: none;
+            border-color: var(--rain);
+            box-shadow: 0 0 0 3px rgba(42, 111, 122, 0.15);
+        }
+        button[type="submit"] {
+            width: 100%;
+            padding: 11px;
+            border: none;
+            border-radius: 8px;
+            background: var(--rain);
+            color: #fff;
+            font: inherit;
+            font-weight: 600;
+            cursor: pointer;
+        }
+        button[type="submit"]:hover { background: var(--rain-hover); }
+        .err {
+            background: #fce8ef;
+            border: 1px solid #f0a8b8;
+            color: #881337;
+            padding: 10px 12px;
+            border-radius: 8px;
+            font-size: 0.88rem;
+            margin-bottom: 16px;
+        }
+        .back {
+            display: block;
+            text-align: center;
+            margin-top: 20px;
+            font-size: 0.85rem;
+            color: var(--ink-soft);
+        }
+        .back a { color: var(--rain); }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <h1>Панель оператора</h1>
+        <p class="sub">Вход для сотрудников</p>
+
+        {% if form.errors %}
+            <div class="err">Неверный логин или пароль.</div>
+        {% endif %}
+
+        <form method="post" action="{% url 'inventory:panel_login' %}">
+            {% csrf_token %}
+            <input type="hidden" name="next" value="{{ next }}">
+            <label for="id_username">Логин</label>
+            <input id="id_username" type="text" name="username" autofocus autocomplete="username" required>
+            <label for="id_password">Пароль</label>
+            <input id="id_password" type="password" name="password" autocomplete="current-password" required>
+            <button type="submit">Войти</button>
+        </form>
+
+        <p class="back"><a href="{% url 'inventory:home' %}">← На главную</a></p>
+    </div>
+</body>
+</html>

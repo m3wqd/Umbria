@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Umbria — аренда зонтов</title>
+    <link rel="icon" href="/inventory/image/umbrella.png" type="image/x-icon">
+    <style>
+        :root {
+            --ink: #152028;
+            --ink-soft: #4a5d6b;
+            --paper: #f7f5f0;
+            --card: #fff;
+            --line: #d9e0e6;
+            --rain: #2a6f7a;
+            --rain-dim: #e4f0f2;
+            --leaf: #2d6a4f;
+            --font: "Segoe UI", system-ui, sans-serif;
+            --radius: 12px;
+            --shadow: 0 8px 28px rgba(21, 32, 40, 0.08);
+        }
+        * { box-sizing: border-box; }
+        body {
+            margin: 0;
+            font-family: var(--font);
+            color: var(--ink);
+            background:
+                radial-gradient(ellipse 70% 45% at 90% 0%, rgba(42, 111, 122, 0.14), transparent),
+                var(--paper);
+            line-height: 1.55;
+        }
+        a { color: var(--rain); }
+        .wrap { max-width: 880px; margin: 0 auto; padding: 0 20px 56px; }
+        .top {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 22px 0;
+            border-bottom: 1px solid var(--line);
+            margin-bottom: 40px;
+        }
+        .logo { font-size: 1.4rem; font-weight: 700; letter-spacing: -0.03em; }
+        .top a.staff {
+            font-size: 0.85rem;
+            padding: 8px 14px;
+            border: 1px solid var(--line);
+            border-radius: 8px;
+            background: var(--card);
+            text-decoration: none;
+            color: var(--ink);
+        }
+        .top a.staff:hover { border-color: var(--rain); background: var(--rain-dim); }
+
+        .hero h1 {
+            margin: 0 0 12px;
+            font-size: clamp(1.75rem, 4vw, 2.4rem);
+            font-weight: 700;
+            letter-spacing: -0.03em;
+            line-height: 1.15;
+        }
+        .hero p {
+            margin: 0;
+            font-size: 1.05rem;
+            color: var(--ink-soft);
+            max-width: 36em;
+        }
+
+        .stats {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+            gap: 12px;
+            margin: 36px 0 40px;
+        }
+        .stat {
+            background: var(--card);
+            border: 1px solid var(--line);
+            border-radius: var(--radius);
+            padding: 18px;
+            box-shadow: var(--shadow);
+        }
+        .stat b {
+            display: block;
+            font-size: 2rem;
+            font-weight: 700;
+            letter-spacing: -0.03em;
+            line-height: 1;
+            margin-bottom: 6px;
+        }
+        .stat span { font-size: 0.82rem; color: var(--ink-soft); }
+        .stat.avail b { color: var(--leaf); }
+
+        .steps {
+            background: var(--card);
+            border: 1px solid var(--line);
+            border-radius: var(--radius);
+            padding: 28px 28px 8px;
+            box-shadow: var(--shadow);
+            margin-bottom: 32px;
+        }
+        .steps h2 {
+            margin: 0 0 20px;
+            font-size: 1.1rem;
+        }
+        .steps ol {
+            margin: 0;
+            padding: 0 0 0 1.2em;
+        }
+        .steps li {
+            margin-bottom: 14px;
+            padding-left: 4px;
+        }
+        .steps li strong { color: var(--rain); }
+
+        .note {
+            font-size: 0.9rem;
+            color: var(--ink-soft);
+            border-left: 3px solid var(--rain);
+            padding-left: 14px;
+        }
+        .live { font-size: 0.75rem; color: var(--ink-soft); margin-top: 8px; }
+    </style>
+</head>
+<body>
+    <div class="wrap">
+        <header class="top">
+            <div class="logo">Umbria</div>
+            <a class="staff" href="{% url 'inventory:panel_login' %}">Вход для персонала</a>
+        </header>
+
+        <section class="hero">
+            <h1>Зонт, когда начинается дождь</h1>
+            <p>
+                Подойдите к стойке на кампусе, приложите студенческую карту и возьмите зонт.
+                Верните его в любой свободный слот той же стойки или другой точки Umbria.
+            </p>
+        </section>
+
+        <div class="stats" id="stats">
+            <div class="stat avail">
+                <b id="s-available">{{ available }}</b>
+                <span>свободно сейчас</span>
+            </div>
+            <div class="stat">
+                <b id="s-handouts">{{ on_hand }}</b>
+                <span>на руках</span>
+            </div>
+            <div class="stat">
+                <b id="s-total">{{ total }}</b>
+                <span>зонтов в системе</span>
+            </div>
+            {% if stations %}
+            <div class="stat">
+                <b>{{ stations }}</b>
+                <span>ячеек / слотов</span>
+            </div>
+            {% endif %}
+        </div>
+        <p class="live">Цифры обновляются автоматически</p>
+
+        <section class="steps">
+            <h2>Как пользоваться</h2>
+            <ol>
+                <li><strong>Карта.</strong> Приложите пропуск к считывателю на стойке.</li>
+                <li><strong>Дверца.</strong> Откроется ячейка — возьмите зонт или положите свой при возврате.</li>
+                <li><strong>Готово.</strong> Закройте дверцу. После дождя верните зонт — он просушится перед следующей выдачей.</li>
+            </ol>
+        </section>
+
+        <p class="note">
+            Карта должна быть зарегистрирована в системе. Если выдача не срабатывает, обратитесь к администратору стойки.
+        </p>
+    </div>
+
+    <script>
+        async function refreshStats() {
+            try {
+                const [activeR, objectsR] = await Promise.all([
+                    fetch("/api/active/"),
+                    fetch("/api/objects/"),
+                ]);
+                const active = await activeR.json();
+                const objects = await objectsR.json();
+                const list = objects.objects || [];
+                let avail = 0;
+                for (const o of list) {
+                    if (o.status_code === "ok") avail++;
+                }
+                const handouts = (active.handouts || []).length;
+                document.getElementById("s-available").textContent = avail;
+                document.getElementById("s-handouts").textContent = handouts;
+                document.getElementById("s-total").textContent = list.length;
+            } catch (e) { /* тихо */ }
+        }
+        refreshStats();
+        setInterval(refreshStats, 5000);
+    </script>
+</body>
+</html>

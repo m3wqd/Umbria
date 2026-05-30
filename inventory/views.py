@@ -5,7 +5,9 @@ import re
 
 from django.conf import settings
 from django.contrib import messages
+from django.contrib.auth.decorators import login_required
 from django.db import transaction
+from django.db.models import Q
 from django.db.models import Exists, OuterRef
 from django.http import HttpRequest, HttpResponse, JsonResponse
 from django.shortcuts import redirect, render
@@ -311,7 +313,33 @@ def api_rent_umbrella(request: HttpRequest) -> JsonResponse:
 #  Веб-интерфейс
 # =====================================================================
 
-def index(request: HttpRequest) -> HttpResponse:
+def home(request: HttpRequest) -> HttpResponse:
+    """Публичная страница для посетителей."""
+    total = TrackedObject.objects.count()
+    on_hand = Handout.objects.filter(returned_at__isnull=True).count()
+    available = TrackedObject.objects.filter(
+        cell__isnull=False,
+        is_drying=False,
+        needs_drying=False,
+    ).count()
+    drying = TrackedObject.objects.filter(
+        Q(is_drying=True) | Q(needs_drying=True)
+    ).count()
+    stations = Cell.objects.count()
+    return render(request, "inventory/home.html", {
+        "total": total,
+        "on_hand": on_hand,
+        "available": available,
+        "drying": drying,
+        "stations": stations,
+    })
+
+
+@login_required
+def panel(request: HttpRequest) -> HttpResponse:
+    if not request.user.is_staff:
+        messages.error(request, "Доступ к панели только у сотрудников.")
+        return redirect("inventory:home")
     if request.method == "POST":
         action   = request.POST.get("action", "")
         irf_tag  = (request.POST.get("irf_tag") or "").strip()
@@ -320,22 +348,22 @@ def index(request: HttpRequest) -> HttpResponse:
         if action == "take":
             if not irf_tag or not pass_tag:
                 messages.error(request, "Укажите IRF-метку зонта и карту клиента.")
-                return redirect("inventory:index")
+                return redirect("inventory:panel")
             try:
                 obj = TrackedObject.objects.get(irf_tag=irf_tag)
             except TrackedObject.DoesNotExist:
                 messages.error(request, f"Зонт '{irf_tag}' не найден.")
-                return redirect("inventory:index")
+                return redirect("inventory:panel")
             try:
                 user = UserTag.objects.get(pass_tag=pass_tag)
             except UserTag.DoesNotExist:
                 messages.error(request, f"Карта '{pass_tag}' не найдена.")
-                return redirect("inventory:index")
+                return redirect("inventory:panel")
 
             with transaction.atomic():
                 if Handout.objects.filter(object=obj, returned_at__isnull=True).exists():
                     messages.error(request, "Этот зонт уже на руках.")
-                    return redirect("inventory:index")
+                    return redirect("inventory:panel")
                 if not obj.home_cell_id and obj.cell_id:
                     obj.home_cell = obj.cell
                 obj.cell = None
@@ -343,18 +371,18 @@ def index(request: HttpRequest) -> HttpResponse:
                 Handout.objects.create(object=obj, user=user, issued_at=timezone.now())
 
             messages.success(request, "Зонт выдан.")
-            return redirect("inventory:index")
+            return redirect("inventory:panel")
 
         if action == "return":
             if not irf_tag:
                 messages.error(request, "Укажите IRF-метку зонта.")
-                return redirect("inventory:index")
+                return redirect("inventory:panel")
             cell_code = (request.POST.get("cell_code") or "").strip()
             try:
                 obj = TrackedObject.objects.get(irf_tag=irf_tag)
             except TrackedObject.DoesNotExist:
                 messages.error(request, f"Зонт '{irf_tag}' не найден.")
-                return redirect("inventory:index")
+                return redirect("inventory:panel")
 
             with transaction.atomic():
                 active = (
@@ -364,7 +392,7 @@ def index(request: HttpRequest) -> HttpResponse:
                 )
                 if not active:
                     messages.error(request, "Активной выдачи для этого зонта нет.")
-                    return redirect("inventory:index")
+                    return redirect("inventory:panel")
 
                 active.returned_at = timezone.now()
                 active.save(update_fields=["returned_at"])
@@ -374,7 +402,7 @@ def index(request: HttpRequest) -> HttpResponse:
                         cell = Cell.objects.get(cell_code=cell_code)
                     except Cell.DoesNotExist:
                         messages.error(request, f"Ячейка '{cell_code}' не найдена.")
-                        return redirect("inventory:index")
+                        return redirect("inventory:panel")
                     obj.cell = cell
                 elif obj.home_cell_id:
                     obj.cell = obj.home_cell
@@ -383,10 +411,10 @@ def index(request: HttpRequest) -> HttpResponse:
                 obj.save(update_fields=["cell", "needs_drying"])
 
             messages.success(request, "Зонт возвращён и отправлен на сушку.")
-            return redirect("inventory:index")
+            return redirect("inventory:panel")
 
         messages.error(request, "Неизвестное действие.")
-        return redirect("inventory:index")
+        return redirect("inventory:panel")
 
     # GET
     objects = TrackedObject.objects.select_related("cell", "home_cell").order_by("irf_tag")
@@ -397,7 +425,7 @@ def index(request: HttpRequest) -> HttpResponse:
     cells = Cell.objects.order_by("cell_code")
     users = UserTag.objects.order_by("pass_tag")
 
-    return render(request, "inventory/index.html", {
+    return render(request, "inventory/panel.html", {
         "objects": objects,
         "active_handouts": active_handouts,
         "cells": cells,

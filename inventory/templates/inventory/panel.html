@@ -4,7 +4,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Umbria</title>
+    <title>Umbria — панель</title>
     <link rel="icon" href="/inventory/image/umbrella.png" type="image/x-icon">
     <style>
         :root {
@@ -117,6 +117,21 @@
         .bar-nav a.primary:hover {
             background: var(--rain-hover);
             border-color: var(--rain-hover);
+        }
+        .logout-form { display: inline; margin: 0; }
+        .logout-form button {
+            font: inherit;
+            font-size: 0.85rem;
+            padding: 8px 14px;
+            border-radius: 8px;
+            border: 1px solid var(--line);
+            background: var(--card);
+            color: var(--ink);
+            cursor: pointer;
+        }
+        .logout-form button:hover {
+            border-color: var(--rain);
+            background: var(--rain-dim);
         }
 
         /* ── top row: dryer + stats ── */
@@ -387,12 +402,12 @@
                 </div>
             </div>
             <nav class="bar-nav">
-                <a href="{% url 'admin:index' %}" class="primary">Админка</a>
-                {% if user.is_staff %}
-                    <a href="{% url 'admin:logout' %}">Выйти</a>
-                {% else %}
-                    <a href="{% url 'admin:login' %}?next={{ request.path }}">Войти</a>
-                {% endif %}
+                <a href="{% url 'inventory:home' %}">На сайт</a>
+                <a href="{% url 'admin:index' %}">Админка</a>
+                <form method="post" action="{% url 'inventory:panel_logout' %}" class="logout-form">
+                    {% csrf_token %}
+                    <button type="submit">Выйти</button>
+                </form>
             </nav>
         </header>
 

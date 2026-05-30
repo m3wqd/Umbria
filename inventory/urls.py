@@ -1,10 +1,19 @@
+from django.contrib.auth import views as auth_views
 from django.urls import path, re_path
+
 from . import views
 
 app_name = "inventory"
 
 urlpatterns = [
-    path("",                    views.index,                 name="index"),
+    path("", views.home, name="home"),
+    path("panel/", views.panel, name="panel"),
+    path(
+        "panel/login/",
+        auth_views.LoginView.as_view(template_name="inventory/panel_login.html"),
+        name="panel_login",
+    ),
+    path("panel/logout/", auth_views.LogoutView.as_view(), name="panel_logout"),
 
     # Старый (одним запросом) — для обратной совместимости
     path("api/rent/",           views.api_rent,              name="api_rent"),
