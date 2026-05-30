@@ -47,6 +47,40 @@ def _available_umbrellas_qs():
     )
 
 
+# Действия, которые понимает прошивка стойки (иначе «неизвестный ответ» и звук 5).
+_ARDUINO_ACTIONS = frozenset({
+    "take", "return", "error", "wait_return", "empty", "ok",
+})
+
+
+def _rent_response(payload: dict, *, status: int = 200) -> JsonResponse:
+    """
+    Ответ для Arduino/ESP:
+    - только известные action;
+    - sound=5 только при явной передаче (не через HTTP 409 и не через поле available).
+    """
+    action = str(payload.get("action", ""))
+
+    if action == "wait_umbrella":
+        mode = payload.get("mode", "take")
+        payload["action"] = "wait_return" if mode == "return" else "ok"
+    elif action not in _ARDUINO_ACTIONS:
+        payload["action"] = "ok"
+
+    # Поле available=5 прошивка иногда путает с треком DFPlayer №5
+    payload.pop("available", None)
+    payload.pop("error_code", None)
+
+    if payload.get("action") == "error":
+        if payload.get("sound") != 5:
+            payload["sound"] = 0
+    else:
+        payload["sound"] = 0
+
+    payload.setdefault("open_door", False)
+    return JsonResponse(payload, status=status)
+
+
 def _api_error(
     message: str,
     *,
@@ -56,21 +90,18 @@ def _api_error(
     sound: int = 0,
     **extra,
 ) -> JsonResponse:
-    """sound=0 — без озвучки; sound=5 — только «нет свободных зонтов»."""
     payload = {
         "action": "error",
         "open_door": open_door,
         "message": message,
-        "error_code": error_code,
         "sound": sound,
     }
     payload.update(extra)
-    return JsonResponse(payload, status=status)
+    return _rent_response(payload, status=status)
 
 
 def _api_json(payload: dict, *, status: int = 200) -> JsonResponse:
-    payload.setdefault("sound", 0)
-    return JsonResponse(payload, status=status)
+    return _rent_response(payload, status=status)
 
 
 def _api_rent_start_session(card_uid: str) -> JsonResponse:
@@ -105,21 +136,18 @@ def _api_rent_start_session(card_uid: str) -> JsonResponse:
         umbrella_tag = active.object.irf_tag if active else ""
         print(f"  → сессия RETURN, ждём зонт {umbrella_tag!r}")
         return _api_json({
-            "action": "wait_umbrella",
+            "action": "wait_return",
             "open_door": False,
-            "mode": "return",
-            "message": "Приложите зонт для возврата",
             "umbrella": umbrella_tag,
+            "message": "Приложите зонт для возврата",
         })
 
-    available = _available_umbrellas_qs().count()
-    print(f"  → сессия TAKE, ждём зонт (в базе доступно: {available})")
+    free = _available_umbrellas_qs().count()
+    print(f"  → сессия TAKE, ждём зонт (свободно в базе: {free})")
     return _api_json({
-        "action": "wait_umbrella",
+        "action": "ok",
         "open_door": False,
-        "mode": "take",
         "message": "Приложите зонт для выдачи",
-        "available": available,
     })
 
 
@@ -319,8 +347,12 @@ def api_rent(request: HttpRequest) -> JsonResponse:
             umbrella = _available_umbrellas_qs().first()
             if umbrella:
                 return _do_take(user, umbrella)
-            print(f"  ⚠ нет свободных — ждём метку, без 409")
-            return _api_rent_start_session(card_uid)
+            print(f"  ⚠ нет свободных — ждём метку зонта")
+            return _api_json({
+                "action": "ok",
+                "open_door": False,
+                "message": "Приложите зонт для выдачи",
+            })
 
     return _api_rent_start_session(card_uid)
 
@@ -339,12 +371,12 @@ def api_rent_card(request: HttpRequest) -> JsonResponse:
 def api_rent_umbrella(request: HttpRequest) -> JsonResponse:
     expected_token = getattr(settings, "ARDUINO_TOKEN", None)
     if expected_token and request.headers.get("X-Device-Token") != expected_token:
-        return JsonResponse({"action": "error", "message": "unauthorized"}, status=401)
+        return _api_error("unauthorized", error_code="unauthorized", status=401)
 
     try:
         data = json.loads(request.body.decode("utf-8"))
     except (json.JSONDecodeError, UnicodeDecodeError):
-        return JsonResponse({"action": "error", "message": "invalid json"}, status=400)
+        return _api_error("invalid json", error_code="invalid_json", status=400)
 
     _, umbrella_uid = _parse_rent_ids(data)
     if not umbrella_uid:
