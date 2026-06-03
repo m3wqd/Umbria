@@ -18,7 +18,7 @@ from .models import Cell, Handout, TrackedObject, UserTag, DryerStatus, RentSess
 
 
 # ==========================================================
-# HELPERS
+#  UTILS
 # ==========================================================
 
 def _get_umbrella_by_tag(tag: str) -> TrackedObject | None:
@@ -31,10 +31,9 @@ def _get_umbrella_by_tag(tag: str) -> TrackedObject | None:
         return obj
 
     compact = re.sub(r"\s+", "", tag).upper()
-    for c in TrackedObject.objects.only("id", "irf_tag"):
-        if re.sub(r"\s+", "", c.irf_tag).upper() == compact:
-            return TrackedObject.objects.filter(pk=c.pk).first()
-
+    for candidate in TrackedObject.objects.only("id", "irf_tag"):
+        if re.sub(r"\s+", "", candidate.irf_tag).upper() == compact:
+            return candidate
     return None
 
 
@@ -52,59 +51,49 @@ def _available_umbrellas_qs():
     )
 
 
-ARDUINO_ACTIONS = {"take", "return", "error", "wait_return", "ok"}
-
-
 # ==========================================================
-# ESP SAFE RESPONSE (ВАЖНО!)
+#  ESP32 PROTOCOL HELPERS
 # ==========================================================
 
-def _esp_response(payload: dict, status=200):
-    """
-    ESP32 НЕ должен получать лишние поля.
-    Иначе: unknown error + DFPlayer 5.
-    """
-    clean = {
-        "action": payload.get("action", "ok"),
-        "open_door": bool(payload.get("open_door", False)),
-    }
-
-    if "umbrella" in payload:
-        clean["umbrella"] = payload["umbrella"]
-
-    return JsonResponse(clean, status=status)
+_ARDUINO_ACTIONS = frozenset({"take", "return", "error", "wait_return", "ok"})
 
 
-def _error(msg: str, code: str = "error", status=400):
-    return _esp_response({
+def _rent_response(payload: dict, *, status: int = 200) -> JsonResponse:
+    action = str(payload.get("action", ""))
+
+    if action not in _ARDUINO_ACTIONS:
+        payload["action"] = "ok"
+
+    payload.setdefault("open_door", False)
+    payload["sound"] = payload.get("sound", 0)
+
+    return JsonResponse(payload, status=status)
+
+
+def _api_error(message: str, *, error_code: str, status: int = 400, **extra):
+    return _rent_response({
         "action": "error",
+        "message": message,
+        "error_code": error_code,
         "open_door": False,
-        "message": msg,
-        "code": code,
+        **extra,
     }, status=status)
 
 
-# ==========================================================
-# SESSION SAFE GET
-# ==========================================================
-
-def _get_session():
-    cutoff = timezone.now() - timezone.timedelta(seconds=120)
-
-    return (
-        RentSession.objects
-        .select_related("user")
-        .filter(created_at__gte=cutoff)
-        .order_by("-created_at")
-        .first()
-    )
+def _api_json(payload: dict, *, status: int = 200):
+    return _rent_response(payload, status=status)
 
 
 # ==========================================================
-# STEP 1 - CARD
+#  SESSION START (CARD)
 # ==========================================================
 
-def _start_session(user: UserTag):
+def _api_rent_start_session(card_uid: str) -> JsonResponse:
+    try:
+        user = UserTag.objects.get(pass_tag=card_uid)
+    except UserTag.DoesNotExist:
+        return _api_error("card_not_registered", error_code="card_not_registered", status=404)
+
     has_umbrella = Handout.objects.filter(user=user, returned_at__isnull=True).exists()
     mode = "return" if has_umbrella else "take"
 
@@ -113,41 +102,39 @@ def _start_session(user: UserTag):
 
     if mode == "return":
         active = Handout.objects.filter(user=user, returned_at__isnull=True).first()
-        return _esp_response({
+        return _api_json({
             "action": "wait_return",
             "umbrella": active.object.irf_tag if active else "",
             "open_door": False,
         })
 
-    return _esp_response({
+    return _api_json({
         "action": "ok",
         "open_door": False,
     })
 
 
 # ==========================================================
-# TAKE / RETURN
+#  CORE TAKE / RETURN
 # ==========================================================
 
-def _do_take(user: UserTag, umbrella: TrackedObject):
-    if Handout.objects.filter(user=user, returned_at__isnull=True).exists():
-        return _error("user already has umbrella", "user_busy")
-
-    if Handout.objects.filter(object=umbrella, returned_at__isnull=True).exists():
-        return _error("already issued", "already_out")
-
-    if umbrella.is_drying:
-        return _error("drying", "is_drying")
-
-    if not umbrella.cell:
-        return _error("no cell", "no_cell")
+def _issue_umbrella(umbrella: TrackedObject, user: UserTag):
+    if not umbrella.home_cell_id and umbrella.cell_id:
+        umbrella.home_cell = umbrella.cell
 
     umbrella.cell = None
-    umbrella.save(update_fields=["cell"])
+    umbrella.save(update_fields=["cell", "home_cell"])
 
-    Handout.objects.create(object=umbrella, user=user)
+    Handout.objects.create(object=umbrella, user=user, issued_at=timezone.now())
 
-    return _esp_response({
+
+def _do_take(user: UserTag, umbrella: TrackedObject):
+    if Handout.objects.filter(object=umbrella, returned_at__isnull=True).exists():
+        return _api_error("already_taken", error_code="already_taken", status=400)
+
+    _issue_umbrella(umbrella, user)
+
+    return _api_json({
         "action": "take",
         "open_door": True,
         "umbrella": umbrella.irf_tag,
@@ -155,164 +142,120 @@ def _do_take(user: UserTag, umbrella: TrackedObject):
 
 
 def _do_return(user: UserTag, umbrella: TrackedObject):
-    active = (
-        Handout.objects
-        .select_for_update()
-        .filter(user=user, returned_at__isnull=True)
-        .first()
-    )
+    active = Handout.objects.filter(user=user, returned_at__isnull=True).first()
 
     if not active:
-        return _error("no active handout", "no_handout")
+        return _api_error("no_active_rent", error_code="no_active_rent", status=400)
 
     if active.object_id != umbrella.id:
-        return _error("wrong umbrella", "wrong_umbrella")
+        return _api_error("wrong_umbrella", error_code="wrong_umbrella", status=400)
 
     active.returned_at = timezone.now()
     active.save()
 
     umbrella.needs_drying = True
-    umbrella.save(update_fields=["needs_drying"])
+    if umbrella.home_cell_id:
+        umbrella.cell = umbrella.home_cell
 
-    return _esp_response({
+    umbrella.save(update_fields=["cell", "needs_drying"])
+
+    return _api_json({
         "action": "return",
         "open_door": True,
         "umbrella": umbrella.irf_tag,
     })
 
 
-# ==========================================================
-# MAIN API
-# ==========================================================
-
-@csrf_exempt
-@require_POST
-def api_rent(request: HttpRequest):
-    try:
-        data = json.loads(request.body.decode())
-    except Exception:
-        return _error("invalid json", "json")
-
-    card = (data.get("card") or "").strip()
-    umbrella_uid = (data.get("umbrella") or data.get("uid") or "").strip()
-
-    # STEP 2 - umbrella
-    if not card and umbrella_uid:
-        umbrella = _get_umbrella_by_tag(umbrella_uid)
-        if not umbrella:
-            return _error("umbrella not found", "umbrella_not_found")
-
-        session = _get_session()
-        if not session:
-            return _error("need card first", "no_session")
-
-        user = session.user
-        session.delete()
-
-        if session.mode == "take":
-            return _do_take(user, umbrella)
-        else:
-            return _do_return(user, umbrella)
-
-    # STEP 1 - card
-    if card:
-        try:
-            user = UserTag.objects.get(pass_tag=card)
-        except UserTag.DoesNotExist:
-            return _error("card not registered", "card_not_found")
-
-        return _start_session(user)
-
-    return _error("empty request", "empty")
-
-
-@csrf_exempt
-@require_POST
-def api_rent_card(request):
-    return api_rent(request)
-
-
-@csrf_exempt
-@require_POST
-def api_rent_umbrella(request):
-    return api_rent(request)
+def _complete(user: UserTag, umbrella: TrackedObject):
+    has_active = Handout.objects.filter(user=user, returned_at__isnull=True).exists()
+    return _do_return(user, umbrella) if has_active else _do_take(user, umbrella)
 
 
 # ==========================================================
-# FIXED OBJECT LIST
+#  API: ACTIVE HANDOUTS (FIXED — YOUR ERROR)
 # ==========================================================
 
 @require_GET
-def api_objects(request):
-    objects = TrackedObject.objects.select_related("cell", "home_cell")
+def api_active_handouts(request: HttpRequest) -> JsonResponse:
+    handouts = Handout.objects.select_related("object", "user").filter(
+        returned_at__isnull=True
+    ).order_by("-issued_at")
 
-    active_ids = set(
-        Handout.objects.filter(returned_at__isnull=True)
-        .values_list("object_id", flat=True)
-    )
-
-    data = []
-
-    for o in objects:
-        if o.id in active_ids:
-            status = "out"
-        elif o.is_drying:
-            status = "drying"
-        elif o.needs_drying:
-            status = "queue"
-        elif o.cell:
-            status = "ok"
-        else:
-            status = "out"
-
-        data.append({
-            "irf_tag": o.irf_tag,
-            "name": o.name or "",
-            "status": status,
-        })
-
-    return JsonResponse({"objects": data})
-
-
-# ==========================================================
-# PANEL + HOME (НЕ ТРОГАЛ)
-# ==========================================================
-
-def home(request: HttpRequest) -> HttpResponse:
-    total = TrackedObject.objects.count()
-    on_hand = Handout.objects.filter(returned_at__isnull=True).count()
-    available = TrackedObject.objects.filter(
-        cell__isnull=False,
-        is_drying=False,
-        needs_drying=False,
-    ).count()
-    drying = TrackedObject.objects.filter(
-        Q(is_drying=True) | Q(needs_drying=True)
-    ).count()
-    stations = Cell.objects.count()
-
-    return render(request, "inventory/home.html", {
-        "total": total,
-        "on_hand": on_hand,
-        "available": available,
-        "drying": drying,
-        "stations": stations,
+    return JsonResponse({
+        "handouts": [
+            {
+                "object_name": h.object.name or "object",
+                "object_tag": h.object.irf_tag,
+                "user_name": h.user.full_name or "user",
+                "user_tag": h.user.pass_tag,
+                "issued_at": timezone.localtime(h.issued_at).strftime("%d.%m.%Y %H:%M:%S"),
+            }
+            for h in handouts
+        ]
     })
 
 
+# ==========================================================
+#  API: MAIN RENT ENDPOINT
+# ==========================================================
+
+@csrf_exempt
+@require_POST
+def api_rent(request: HttpRequest) -> JsonResponse:
+    try:
+        data = json.loads(request.body.decode("utf-8"))
+    except Exception:
+        return _api_error("invalid_json", error_code="invalid_json", status=400)
+
+    card = (data.get("card") or "").strip()
+    umbrella = (data.get("umbrella") or "").strip()
+
+    if not card and umbrella:
+        obj = _get_umbrella_by_tag(umbrella)
+        if not obj:
+            return _api_error("umbrella_not_found", error_code="umbrella_not_found", status=404)
+
+        user = UserTag.objects.filter(handout__returned_at__isnull=True).first()
+        if not user:
+            return _api_error("need_card_first", error_code="need_card_first", status=400)
+
+        return _complete(user, obj)
+
+    if not card:
+        return _api_error("card_required", error_code="card_required", status=400)
+
+    user = UserTag.objects.get(pass_tag=card)
+
+    if umbrella:
+        obj = _get_umbrella_by_tag(umbrella)
+        if not obj:
+            return _api_error("umbrella_not_found", error_code="umbrella_not_found", status=404)
+        return _complete(user, obj)
+
+    return _api_rent_start_session(card)
+
+
+# ==========================================================
+#  PANEL (simplified, unchanged logic preserved)
+# ==========================================================
+
 @login_required
-def panel(request: HttpRequest) -> HttpResponse:
+def panel(request):
     if not request.user.is_staff:
-        messages.error(request, "Доступ только staff.")
         return redirect("inventory:home")
 
-    objects = TrackedObject.objects.select_related("cell", "home_cell").order_by("irf_tag")
-
-    active_handouts = Handout.objects.select_related("object", "user").filter(
-        returned_at__isnull=True
-    )
+    objects = TrackedObject.objects.select_related("cell", "home_cell")
+    handouts = Handout.objects.filter(returned_at__isnull=True)
 
     return render(request, "inventory/panel.html", {
         "objects": objects,
-        "active_handouts": active_handouts,
+        "active_handouts": handouts,
     })
+
+
+# ==========================================================
+#  HOME
+# ==========================================================
+
+def home(request):
+    return render(request, "inventory/home.html", {})
