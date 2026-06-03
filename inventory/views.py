@@ -319,13 +319,12 @@ def api_rent(request: HttpRequest) -> JsonResponse:
     Простой режим: считыватель ТОЛЬКО карт.
 
     Логика:
+      • Карта НЕ зарегистрирована                      → ERROR (sound 4)
       • Карта зарег + нет активной выдачи + есть зонты → ВЫДАЁМ (sound 1)
       • Карта зарег + нет активной выдачи + нет зонтов → ERROR (sound 5)
-      • Карта зарег + есть активная выдача → wait_return (sound 2), замок открыт
-      • Карта НЕ зарегистрирована                     → ERROR (sound 4)
-
-    Возврат подтверждается ВРУЧНУЮ (через админку / shell / /panel),
-    пока нет считывателя зонтов или датчика бокса.
+      • Карта зарег + есть активная выдача             → ЗАКРЫВАЕМ выдачу
+                                                         + sound 2 «Положите»
+                                                         + замок открыт
     """
     expected_token = getattr(settings, "ARDUINO_TOKEN", None)
     if expected_token and request.headers.get("X-Device-Token") != expected_token:
@@ -368,13 +367,24 @@ def api_rent(request: HttpRequest) -> JsonResponse:
             .first()
         )
 
-        # 🎯 У ЮЗЕРА УЖЕ ЕСТЬ ЗОНТ — просим вернуть, замок открываем
+        # 🎯 У ЮЗЕРА ЕСТЬ ЗОНТ → ЗАКРЫВАЕМ ВЫДАЧУ + просим положить
         if active:
-            print(f"  ⏳ wait_return: у юзера зонт {active.object.irf_tag}")
+            umbrella = active.object
+
+            active.returned_at = timezone.now()
+            active.save(update_fields=["returned_at"])
+
+            umbrella.needs_drying = True
+            if umbrella.home_cell_id:
+                umbrella.cell = umbrella.home_cell
+            umbrella.save(update_fields=["cell", "needs_drying"])
+
+            print(f"  ✅ ВОЗВРАТ {umbrella.irf_tag} → закрыт в БД")
+
             return _api_json({
-                "action": "wait_return",
+                "action": "wait_return",      # sound 2 «Положите зонт в бокс»
                 "open_door": True,
-                "umbrella": active.object.irf_tag,
+                "umbrella": umbrella.irf_tag,
                 "user": str(user),
                 "message": "Положите зонт в бокс",
             })
@@ -390,7 +400,7 @@ def api_rent(request: HttpRequest) -> JsonResponse:
                 )
             return _complete_rent_for_user(user, umbrella)
 
-        # 🎯 У ЮЗЕРА НЕТ ЗОНТА — пробуем выдать
+        # 🎯 У ЮЗЕРА НЕТ ЗОНТА → пробуем выдать
         if box_has is True:
             umbrella = _available_umbrellas_qs().first()
             if umbrella:
