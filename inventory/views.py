@@ -180,15 +180,6 @@ def _parse_box_has(data: dict) -> bool | None:
 
 
 def _do_take(user: UserTag, umbrella: TrackedObject) -> JsonResponse | None:
-    if Handout.objects.filter(
-    user=user,
-    returned_at__isnull=True
-).exists():
-    return _api_error(
-        "У пользователя уже есть зонт",
-        error_code="user_already_has_umbrella",
-        status=400,
-    )
     """Выдача зонта. None — если проверки не прошли (ответ уже сформирован снаружи)."""
     if Handout.objects.filter(object=umbrella, returned_at__isnull=True).exists():
         return _api_error("Этот зонт уже выдан", error_code="already_out", status=400)
@@ -588,44 +579,30 @@ def api_active_handouts(request: HttpRequest) -> JsonResponse:
 
 @require_GET
 def api_objects(request: HttpRequest) -> JsonResponse:
-   objects = (
-    TrackedObject.objects
-    .select_related("cell", "home_cell")
-    .order_by("irf_tag")
-)
+    objects = TrackedObject.objects.select_related("cell", "home_cell").order_by("irf_tag")
+    data = []
+    for o in objects:
+        if o.is_drying:
+            status_code, status_label = "drying", "сушится"
+        elif o.needs_drying:
+            status_code, status_label = "queue", "в очереди"
+        elif o.cell_id:
+            status_code, status_label = "ok", "на месте"
+        else:
+            status_code, status_label = "out", "на руках"
 
-active_ids = set(
-    Handout.objects.filter(
-        returned_at__isnull=True
-    ).values_list("object_id", flat=True)
-)
+        data.append({
+            "irf_tag":      o.irf_tag,
+            "name":         o.name or "",
+            "cell":         o.cell.cell_code if o.cell else "",
+            "home_cell":    o.home_cell.cell_code if o.home_cell else "",
+            "status_code":  status_code,
+            "status_label": status_label,
+            "humidity":     o.last_humidity,
+            "temp":         o.last_temp,
+        })
+    return JsonResponse({"objects": data})
 
-data = []
-
-for o in objects:
-    if o.id in active_ids:
-        status_code, status_label = "out", "на руках"
-    elif o.is_drying:
-        status_code, status_label = "drying", "сушится"
-    elif o.needs_drying:
-        status_code, status_label = "queue", "в очереди"
-    elif o.cell_id:
-        status_code, status_label = "ok", "на месте"
-    else:
-        status_code, status_label = "out", "на руках"
-
-    data.append({
-        "irf_tag": o.irf_tag,
-        "name": o.name or "",
-        "cell": o.cell.cell_code if o.cell else "",
-        "home_cell": o.home_cell.cell_code if o.home_cell else "",
-        "status_code": status_code,
-        "status_label": status_label,
-        "humidity": o.last_humidity,
-        "temp": o.last_temp,
-    })
-
-return JsonResponse({"objects": data})
 
 #  Сушилка - ловит запросов ESP
 
@@ -858,4 +835,4 @@ def api_dryer_done(request: HttpRequest) -> JsonResponse:
     obj.needs_drying  = False
     obj.last_dried_at = timezone.now()
     obj.save(update_fields=["is_drying", "needs_drying", "last_dried_at"])
-    return JsonResponse({"ok": True})``
+    return JsonResponse({"ok": True})
