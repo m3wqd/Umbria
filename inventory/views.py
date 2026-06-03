@@ -18,16 +18,28 @@ from django.views.decorators.http import require_POST, require_GET
 from .models import Cell, Handout, TrackedObject, UserTag, DryerStatus, RentSession
 
 
+# =====================================================================
+#  Утилиты поиска зонта по метке
+# =====================================================================
 def _get_umbrella_by_tag(tag: str) -> TrackedObject | None:
     tag = (tag or "").strip()
     if not tag:
         return None
+
+    # 1) Точное совпадение
     obj = TrackedObject.objects.filter(irf_tag=tag).first()
     if obj:
         return obj
-    compact = re.sub(r"\s+", "", tag).upper()
+
+    # 2) Нормализуем (убираем пробелы, двоеточия, тире)
+    def normalize(s: str) -> str:
+        return re.sub(r"[\s:\-]+", "", s).upper()
+
+    compact = normalize(tag)
+    if not compact:
+        return None
     for candidate in TrackedObject.objects.only("id", "irf_tag"):
-        if re.sub(r"\s+", "", candidate.irf_tag).upper() == compact:
+        if normalize(candidate.irf_tag) == compact:
             return TrackedObject.objects.filter(pk=candidate.pk).first()
     return None
 
@@ -47,36 +59,61 @@ def _available_umbrellas_qs():
     )
 
 
-# Действия, которые понимает прошивка стойки (иначе «неизвестный ответ» и звук 5).
+# =====================================================================
+#  Ответы для Arduino: action + sound + open_door
+# =====================================================================
 _ARDUINO_ACTIONS = frozenset({
     "take", "return", "error", "wait_return", "empty", "ok",
 })
 
+# 🎯 Маппинг action → номер mp3 на SD (0001..0005.mp3)
+_SOUND_BY_ACTION = {
+    "take":        1,   # 0001.mp3  «Возьмите зонт»
+    "wait_return": 2,   # 0002.mp3  «Положите зонт в бокс»
+    "return":      3,   # 0003.mp3  «Зонт возвращён, спасибо»
+    "ok":          2,   # ждём зонт — та же подсказка что и wait_return
+    "empty":       5,   # 0005.mp3  «Нет свободных зонтов»
+}
+
+# Маппинг error_code → номер mp3 (для конкретных ошибок)
+_SOUND_BY_ERROR = {
+    "card_not_registered":  4,   # 0004.mp3 «Карта не зарегистрирована»
+    "umbrella_not_found":   5,   # на всякий случай тоже звук «нет/ошибка»
+    "no_active_handout":    5,
+    "wrong_umbrella":       5,
+    "already_out":          5,
+    "is_drying":            5,
+    "need_card_first":      4,
+    "umbrella_required":    0,
+    "card_required":        0,
+    "invalid_json":         0,
+    "unauthorized":         0,
+    "unknown_mode":         0,
+}
+
 
 def _rent_response(payload: dict, *, status: int = 200) -> JsonResponse:
-    """
-    Ответ для Arduino/ESP:
-    - только известные action;
-    - sound=5 только при явной передаче (не через HTTP 409 и не через поле available).
-    """
+    """Универсальный ответ для прошивки стойки."""
     action = str(payload.get("action", ""))
 
+    # Нормализуем action
     if action == "wait_umbrella":
         mode = payload.get("mode", "take")
         payload["action"] = "wait_return" if mode == "return" else "ok"
+        action = payload["action"]
     elif action not in _ARDUINO_ACTIONS:
         payload["action"] = "ok"
+        action = "ok"
 
-    # Поле available=5 прошивка иногда путает с треком DFPlayer №5
+    # Если sound уже задан явно — оставляем, иначе подставляем по action
+    if "sound" not in payload:
+        if action == "error":
+            err = payload.get("error_code", "")
+            payload["sound"] = _SOUND_BY_ERROR.get(err, 5)
+        else:
+            payload["sound"] = _SOUND_BY_ACTION.get(action, 0)
+
     payload.pop("available", None)
-    payload.pop("error_code", None)
-
-    if payload.get("action") == "error":
-        if payload.get("sound") != 5:
-            payload["sound"] = 0
-    else:
-        payload["sound"] = 0
-
     payload.setdefault("open_door", False)
     return JsonResponse(payload, status=status)
 
@@ -87,15 +124,17 @@ def _api_error(
     error_code: str,
     status: int = 400,
     open_door: bool = False,
-    sound: int = 0,
+    sound: int | None = None,
     **extra,
 ) -> JsonResponse:
     payload = {
         "action": "error",
         "open_door": open_door,
         "message": message,
-        "sound": sound,
+        "error_code": error_code,
     }
+    if sound is not None:
+        payload["sound"] = sound
     payload.update(extra)
     return _rent_response(payload, status=status)
 
@@ -104,11 +143,11 @@ def _api_json(payload: dict, *, status: int = 200) -> JsonResponse:
     return _rent_response(payload, status=status)
 
 
+# =====================================================================
+#  Логика выдачи / возврата
+# =====================================================================
 def _api_rent_start_session(card_uid: str) -> JsonResponse:
-    """
-    Шаг 1: приложили карту. Статус зонтов не меняем — только сессия и wait_umbrella.
-    Так ожидает прошивка стойки (звук 5 не должен играть на этом шаге).
-    """
+    """Шаг 1: приложили карту → создаём сессию, ждём зонт."""
     try:
         user = UserTag.objects.get(pass_tag=card_uid)
     except UserTag.DoesNotExist:
@@ -160,7 +199,7 @@ def _issue_umbrella(umbrella: TrackedObject, user: UserTag) -> None:
 
 
 def _parse_rent_ids(data: dict) -> tuple[str, str]:
-    """Разделить uid карты и метку зонта (Arduino часто шлёт всё в uid)."""
+    """Разделить uid карты и метку зонта."""
     card_uid = (data.get("card") or "").strip()
     umbr_uid = (data.get("umbrella_uid") or data.get("umbrella") or "").strip()
     raw_uid = (data.get("uid") or "").strip()
@@ -180,7 +219,6 @@ def _parse_box_has(data: dict) -> bool | None:
 
 
 def _do_take(user: UserTag, umbrella: TrackedObject) -> JsonResponse | None:
-    """Выдача зонта. None — если проверки не прошли (ответ уже сформирован снаружи)."""
     if Handout.objects.filter(object=umbrella, returned_at__isnull=True).exists():
         return _api_error("Этот зонт уже выдан", error_code="already_out", status=400)
     if umbrella.is_drying:
@@ -246,7 +284,6 @@ def _complete_rent_for_user(user: UserTag, umbrella: TrackedObject) -> JsonRespo
 
 
 def _api_rent_umbrella_step(umbr_uid: str) -> JsonResponse:
-    """Второй шаг через /api/rent/ (только метка зонта в uid)."""
     umbrella = _get_umbrella_by_tag(umbr_uid)
     if not umbrella:
         return _api_error(
@@ -275,14 +312,12 @@ def _api_rent_umbrella_step(umbr_uid: str) -> JsonResponse:
         return _complete_rent_for_user(session.user, umbrella)
 
 
+# =====================================================================
+#  /api/rent/  —  карта (или карта+зонт за один раз)
+# =====================================================================
 @csrf_exempt
 @require_POST
 def api_rent(request: HttpRequest) -> JsonResponse:
-    """
-    Универсальная ручка для стойки:
-    - только карта → сессия (wait_umbrella), без звука 5;
-    - карта + метка зонта / датчик бокса → сразу выдача или возврат (как раньше).
-    """
     expected_token = getattr(settings, "ARDUINO_TOKEN", None)
     if expected_token and request.headers.get("X-Device-Token") != expected_token:
         return _api_error("unauthorized", error_code="unauthorized", status=401)
@@ -360,12 +395,13 @@ def api_rent(request: HttpRequest) -> JsonResponse:
 @csrf_exempt
 @require_POST
 def api_rent_card(request: HttpRequest) -> JsonResponse:
-    """Тот же контракт, что и /api/rent/ (алиас для прошивки)."""
+    """Алиас для /api/rent/."""
     return api_rent(request)
 
 
-#  ШАГ 2: приложили ЗОНТ - ищем сессию, завершаем операцию
-
+# =====================================================================
+#  /api/rent/umbrella/  —  второй шаг: метка зонта
+# =====================================================================
 @csrf_exempt
 @require_POST
 def api_rent_umbrella(request: HttpRequest) -> JsonResponse:
@@ -424,16 +460,10 @@ def api_rent_umbrella(request: HttpRequest) -> JsonResponse:
         return resp
 
 
- # 3. Открытие двери
- 
-
-
 # =====================================================================
 #  Веб-интерфейс
 # =====================================================================
-
 def home(request: HttpRequest) -> HttpResponse:
-    """Публичная страница для посетителей."""
     total = TrackedObject.objects.count()
     on_hand = Handout.objects.filter(returned_at__isnull=True).count()
     available = TrackedObject.objects.filter(
@@ -459,6 +489,7 @@ def panel(request: HttpRequest) -> HttpResponse:
     if not request.user.is_staff:
         messages.error(request, "Доступ к панели только у сотрудников.")
         return redirect("inventory:home")
+
     if request.method == "POST":
         action   = request.POST.get("action", "")
         irf_tag  = (request.POST.get("irf_tag") or "").strip()
@@ -535,7 +566,6 @@ def panel(request: HttpRequest) -> HttpResponse:
         messages.error(request, "Неизвестное действие.")
         return redirect("inventory:panel")
 
-    # GET
     objects = TrackedObject.objects.select_related("cell", "home_cell").order_by("irf_tag")
     active_handouts = (
         Handout.objects.select_related("object", "user")
@@ -552,8 +582,9 @@ def panel(request: HttpRequest) -> HttpResponse:
     })
 
 
+# =====================================================================
 #  API: активные выдачи
-
+# =====================================================================
 @require_GET
 def api_active_handouts(request: HttpRequest) -> JsonResponse:
     handouts = (
@@ -574,9 +605,8 @@ def api_active_handouts(request: HttpRequest) -> JsonResponse:
 
 
 # =====================================================================
-#  API: список всех зонтов
+#  API: список зонтов
 # =====================================================================
-
 @require_GET
 def api_objects(request: HttpRequest) -> JsonResponse:
     objects = TrackedObject.objects.select_related("cell", "home_cell").order_by("irf_tag")
@@ -604,25 +634,16 @@ def api_objects(request: HttpRequest) -> JsonResponse:
     return JsonResponse({"objects": data})
 
 
-#  Сушилка - ловит запросов ESP
-
+# =====================================================================
+#  Сушилка
+# =====================================================================
 @csrf_exempt
 def api_dryer_ping(request: HttpRequest, path: str = "") -> JsonResponse:
-    """
-    Ловятся запросы от ESP сушилки.
-
-    Стадии:
-      • UID считан + влажность > 80   ->  СТАРТ сушки (is_drying=True)
-      • UID считан + 40 < H ≤ 80      ->  В ПРОЦЕССЕ (обновляем H, T)
-      • event="finished" ИЛИ H < 40   ->  ЗАВЕРШЕНО (is_drying=False)
-      • event="failed"                -> СБОЙ
-    """
-    HUMIDITY_WET     = 80.0   # > этого — точно мокрый, начинаем сушку
-    HUMIDITY_DRY     = 40.0   # < этого — сухой, завершаем
+    HUMIDITY_WET = 80.0
+    HUMIDITY_DRY = 40.0
 
     status = DryerStatus.get()
 
-    # Парсим тело запроса 
     raw = ""
     try:
         raw = request.body.decode("utf-8", errors="replace")[:500]
@@ -661,7 +682,6 @@ def api_dryer_ping(request: HttpRequest, path: str = "") -> JsonResponse:
         if m_u: uid   = m_u.group(1).strip()
         if m_e: event = m_e.group(1).strip().lower()
 
-    # Лог входящего запроса 
     print("\n" + "═" * 60)
     print(f"DRYER PING  /{path}")
     print(f"raw     = {raw[:200]}")
@@ -671,11 +691,9 @@ def api_dryer_ping(request: HttpRequest, path: str = "") -> JsonResponse:
     print(f"event   = {event!r}")
     print("─" * 60)
 
-    # Общий статус сушилки 
     if humidity is not None: status.last_humidity = humidity
     if temp     is not None: status.last_temp     = temp
 
-    # ОБРАБОТКА БЕЗ UID 
     if not uid:
         if event == "finished":
             cnt = TrackedObject.objects.filter(is_drying=True).update(
@@ -687,7 +705,6 @@ def api_dryer_ping(request: HttpRequest, path: str = "") -> JsonResponse:
             status.is_active = False
             print(f"СТАДИЯ: СТОП ({event})")
         else:
-            # пустой пинг - сушилка просто жива
             status.is_active = True
             print(f"СТАДИЯ: ПИНГ (без UID, ничего не меняем)")
         status.last_raw = f"uid= H={humidity} T={temp} ev={event}"
@@ -695,7 +712,6 @@ def api_dryer_ping(request: HttpRequest, path: str = "") -> JsonResponse:
         print("═" * 60)
         return JsonResponse({"ok": True, "message": "ping", "event": event})
 
-    # ОБРАБОТКА С UID 
     try:
         obj = TrackedObject.objects.get(irf_tag=uid)
     except TrackedObject.DoesNotExist:
@@ -706,18 +722,15 @@ def api_dryer_ping(request: HttpRequest, path: str = "") -> JsonResponse:
         print("═" * 60)
         return JsonResponse({"ok": False, "message": "umbrella not found"}, status=404)
 
-    # обновляем замеры зонта
     if humidity is not None: obj.last_humidity = humidity
     if temp     is not None: obj.last_temp     = temp
 
-    #   ЯВНЫЕ EVENT'ы от Arduino  
     if event == "finished":
         obj.is_drying     = False
         obj.needs_drying  = False
         obj.last_dried_at = timezone.now()
         status.is_active  = False
         print(f"   📍 СТАДИЯ: ✅ ЗАВЕРШЕНО (event=finished)")
-        print(f"            зонт {uid} высох (H={humidity})")
 
     elif event == "failed":
         obj.is_drying    = False
@@ -731,23 +744,19 @@ def api_dryer_ping(request: HttpRequest, path: str = "") -> JsonResponse:
         print(f"   📍 СТАДИЯ: ▶ СТАРТ (event=start, H={humidity})")
 
     else:
-        # event пустой -> определяем стадию по влажности
         if humidity is None:
-            # UID есть, но без замера — просто отмечаем что в сушилке
             obj.is_drying    = True
             obj.needs_drying = True
             status.is_active = True
             print(f"   СТАДИЯ: вставлен зонт (H неизвестна) — сушим")
 
         elif humidity > HUMIDITY_WET:
-            # МОКРЫЙ → начинаем сушить
             obj.is_drying    = True
             obj.needs_drying = True
             status.is_active = True
             print(f"   СТАДИЯ: СУШИТСЯ  (H={humidity} > {HUMIDITY_WET})")
 
         elif humidity < HUMIDITY_DRY:
-            # СУХОЙ → завершаем
             obj.is_drying     = False
             obj.needs_drying  = False
             obj.last_dried_at = timezone.now()
@@ -755,7 +764,6 @@ def api_dryer_ping(request: HttpRequest, path: str = "") -> JsonResponse:
             print(f"    СТАДИЯ:  ВЫСОХ автоматически (H={humidity} < {HUMIDITY_DRY})")
 
         else:
-            # промежуточная зона — продолжаем сушить
             obj.is_drying    = True
             obj.needs_drying = True
             status.is_active = True
@@ -780,10 +788,6 @@ def api_dryer_ping(request: HttpRequest, path: str = "") -> JsonResponse:
         "temp":     temp,
     })
 
-
-# =====================================================================
-#  API: статус сушилки
-# =====================================================================
 
 @require_GET
 def api_dryer_status(request: HttpRequest) -> JsonResponse:
@@ -811,10 +815,6 @@ def api_dryer_status(request: HttpRequest) -> JsonResponse:
         } if current else None,
     })
 
-
-# =====================================================================
-#  API: ручное завершение сушки
-# =====================================================================
 
 @csrf_exempt
 @require_POST
