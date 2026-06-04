@@ -18,10 +18,8 @@ from django.views.decorators.http import require_POST, require_GET
 from .models import Cell, Handout, TrackedObject, UserTag, DryerStatus, RentSession
 
 
-# =====================================================================
-#  ВСПОМОГАТЕЛЬНЫЕ
-# =====================================================================
-
+ #  ВСПОМОГАТЕЛЬНЫЕ
+ 
 def _get_umbrella_by_tag(tag: str) -> TrackedObject | None:
     tag = (tag or "").strip()
     if not tag:
@@ -51,10 +49,8 @@ def _available_umbrellas_qs():
     )
 
 
-# =====================================================================
-#  ОТВЕТ ДЛЯ ESP32 (action + sound + open_door)
-# =====================================================================
-
+ #  ОТВЕТ ДЛЯ ESP32 (звук и открытие двери)
+ 
 _ARDUINO_ACTIONS = frozenset({
     "take", "return", "error", "wait_return", "empty", "ok",
 })
@@ -74,7 +70,7 @@ def _rent_response(payload: dict, *, status: int = 200) -> JsonResponse:
     """
     action = str(payload.get("action", ""))
 
-    # Нормализуем нестандартные action под прошивку
+    # Нормализуем нестандартные запросы под прошивку
     if action == "wait_umbrella":
         mode = payload.get("mode", "take")
         payload["action"] = "wait_return" if mode == "return" else "ok"
@@ -94,7 +90,7 @@ def _rent_response(payload: dict, *, status: int = 200) -> JsonResponse:
 
     final_action = payload["action"]
 
-    # Если sound не задан явно — берём из карты
+    # Если звук не задан явно — берём из карты
     if "sound" not in payload or payload.get("sound") in (None, 0):
         if final_action == "error":
             msg = (payload.get("message") or "").lower()
@@ -134,10 +130,8 @@ def _api_json(payload: dict, *, status: int = 200) -> JsonResponse:
     return _rent_response(payload, status=status)
 
 
-# =====================================================================
-#  СЕССИЯ (когда работает второй RFID — не используется в простом режиме)
-# =====================================================================
-
+ #  СЕССИЯ (когда работает второй RFID - не используется в простом режиме)
+ 
 def _api_rent_start_session(card_uid: str) -> JsonResponse:
     try:
         user = UserTag.objects.get(pass_tag=card_uid)
@@ -181,10 +175,8 @@ def _api_rent_start_session(card_uid: str) -> JsonResponse:
     })
 
 
-# =====================================================================
-#  ВЫДАЧА / ВОЗВРАТ
-# =====================================================================
-
+ #  ВЫДАЧА / ВОЗВРАТ
+ 
 def _issue_umbrella(umbrella: TrackedObject, user: UserTag) -> None:
     if not umbrella.home_cell_id and umbrella.cell_id:
         umbrella.home_cell = umbrella.cell
@@ -308,10 +300,8 @@ def _api_rent_umbrella_step(umbr_uid: str) -> JsonResponse:
         return _complete_rent_for_user(session.user, umbrella)
 
 
-# =====================================================================
-#  ОСНОВНОЙ ENDPOINT ДЛЯ СТОЙКИ
-# =====================================================================
-
+ #  ОСНОВНОЙ ENDPOINT ДЛЯ СТОЙКИ
+ 
 @csrf_exempt
 @require_POST
 def api_rent(request: HttpRequest) -> JsonResponse:
@@ -367,7 +357,7 @@ def api_rent(request: HttpRequest) -> JsonResponse:
             .first()
         )
 
-        # 🎯 У ЮЗЕРА ЕСТЬ ЗОНТ → ЗАКРЫВАЕМ ВЫДАЧУ + просим положить
+        #ЕСТЬ ЗОНТ → ЗАКРЫВАЕМ ВЫДАЧУ + просим положить
         if active:
             umbrella = active.object
 
@@ -424,10 +414,8 @@ def api_rent_card(request: HttpRequest) -> JsonResponse:
     return api_rent(request)
 
 
-# =====================================================================
-#  Второй шаг — приложили зонт (для будущего, если появится 2-й RFID)
-# =====================================================================
-
+ #  Второй шаг — приложили зонт (для будущего, если появится 2-й RFID)
+ 
 @csrf_exempt
 @require_POST
 def api_rent_umbrella(request: HttpRequest) -> JsonResponse:
@@ -455,7 +443,7 @@ def api_rent_umbrella(request: HttpRequest) -> JsonResponse:
             error_code="umbrella_not_found",
             status=404,
         )
-
+ЮЗЕРА
     cutoff = timezone.now() - timezone.timedelta(seconds=120)
     RentSession.objects.filter(created_at__lt=cutoff).delete()
 
@@ -484,9 +472,9 @@ def api_rent_umbrella(request: HttpRequest) -> JsonResponse:
             return _api_error("unknown mode", error_code="unknown_mode", status=400)
 
 
-# =====================================================================
+
 #  Веб-интерфейс: главная
-# =====================================================================
+
 
 def home(request: HttpRequest) -> HttpResponse:
     total = TrackedObject.objects.count()
@@ -509,9 +497,8 @@ def home(request: HttpRequest) -> HttpResponse:
     })
 
 
-# =====================================================================
 #  Веб-интерфейс: панель оператора (тут подтверждаем возвраты вручную)
-# =====================================================================
+
 
 @login_required
 def panel(request: HttpRequest) -> HttpResponse:
@@ -611,10 +598,8 @@ def panel(request: HttpRequest) -> HttpResponse:
     })
 
 
-# =====================================================================
-#  API: активные выдачи
-# =====================================================================
-
+ #  API: активные выдачи
+ 
 @require_GET
 def api_active_handouts(request: HttpRequest) -> JsonResponse:
     handouts = (
@@ -634,10 +619,8 @@ def api_active_handouts(request: HttpRequest) -> JsonResponse:
     return JsonResponse({"handouts": data})
 
 
-# =====================================================================
-#  API: список всех зонтов
-# =====================================================================
-
+ #  API: список всех зонтов
+ 
 @require_GET
 def api_objects(request: HttpRequest) -> JsonResponse:
     objects = TrackedObject.objects.select_related("cell", "home_cell").order_by("irf_tag")
@@ -665,10 +648,8 @@ def api_objects(request: HttpRequest) -> JsonResponse:
     return JsonResponse({"objects": data})
 
 
-# =====================================================================
-#  Сушилка
-# =====================================================================
-
+ #  Сушилка
+ 
 @csrf_exempt
 def api_dryer_ping(request: HttpRequest, path: str = "") -> JsonResponse:
     HUMIDITY_WET = 80.0
@@ -761,41 +742,41 @@ def api_dryer_ping(request: HttpRequest, path: str = "") -> JsonResponse:
         obj.needs_drying  = False
         obj.last_dried_at = timezone.now()
         status.is_active  = False
-        print(f"   📍 СТАДИЯ: ✅ ЗАВЕРШЕНО (event=finished, H={humidity})")
+        print(f"СТАДИЯ: ЗАВЕРШЕНО (event=finished, H={humidity})")
 
     elif event == "failed":
         obj.is_drying    = False
         status.is_active = False
-        print(f"   📍 СТАДИЯ: ❌ СБОЙ")
+        print(f"СТАДИЯ:  СБОЙ")
 
     elif event == "start":
         obj.is_drying    = True
         obj.needs_drying = True
         status.is_active = True
-        print(f"   📍 СТАДИЯ: ▶ СТАРТ (H={humidity})")
+        print(f"СТАДИЯ: ▶ СТАРТ (H={humidity})")
 
     else:
         if humidity is None:
             obj.is_drying    = True
             obj.needs_drying = True
             status.is_active = True
-            print(f"   СТАДИЯ: вставлен зонт (H неизвестна)")
+            print(f"СТАДИЯ: вставлен зонт (H неизвестна)")
         elif humidity > HUMIDITY_WET:
             obj.is_drying    = True
             obj.needs_drying = True
             status.is_active = True
-            print(f"   СТАДИЯ: СУШИТСЯ (H={humidity} > {HUMIDITY_WET})")
+            print(f"СТАДИЯ: СУШИТСЯ (H={humidity} > {HUMIDITY_WET})")
         elif humidity < HUMIDITY_DRY:
             obj.is_drying     = False
             obj.needs_drying  = False
             obj.last_dried_at = timezone.now()
             status.is_active  = False
-            print(f"   СТАДИЯ: ВЫСОХ (H={humidity} < {HUMIDITY_DRY})")
+            print(f"СТАДИЯ: ВЫСОХ (H={humidity} < {HUMIDITY_DRY})")
         else:
             obj.is_drying    = True
             obj.needs_drying = True
             status.is_active = True
-            print(f"   📍 СТАДИЯ: в процессе (H={humidity})")
+            print(f"СТАДИЯ: в процессе (H={humidity})")
 
     obj.save(update_fields=[
         "is_drying", "needs_drying",
@@ -816,10 +797,8 @@ def api_dryer_ping(request: HttpRequest, path: str = "") -> JsonResponse:
     })
 
 
-# =====================================================================
-#  API: статус сушилки
-# =====================================================================
-
+ #  API: статус сушилки
+ 
 @require_GET
 def api_dryer_status(request: HttpRequest) -> JsonResponse:
     s = DryerStatus.get()
@@ -847,10 +826,8 @@ def api_dryer_status(request: HttpRequest) -> JsonResponse:
     })
 
 
-# =====================================================================
 #  API: ручное завершение сушки
-# =====================================================================
-
+ 
 @csrf_exempt
 @require_POST
 def api_dryer_done(request: HttpRequest) -> JsonResponse:
