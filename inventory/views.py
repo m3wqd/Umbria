@@ -181,7 +181,9 @@ def _api_rent_start_session(card_uid: str) -> JsonResponse:
     })
 
 
+# =====================================================================
 #  ВЫДАЧА / ВОЗВРАТ
+# =====================================================================
 
 def _issue_umbrella(umbrella: TrackedObject, user: UserTag) -> None:
     if not umbrella.home_cell_id and umbrella.cell_id:
@@ -508,7 +510,7 @@ def home(request: HttpRequest) -> HttpResponse:
 
 
 # =====================================================================
-#  Веб-интерфейс: панель оператора (тут подтверждаем возвраты вручную)
+#  Веб-интерфейс: панель оператора
 # =====================================================================
 
 @login_required
@@ -632,7 +634,9 @@ def api_active_handouts(request: HttpRequest) -> JsonResponse:
     return JsonResponse({"handouts": data})
 
 
+# =====================================================================
 #  API: список всех зонтов
+# =====================================================================
 
 @require_GET
 def api_objects(request: HttpRequest) -> JsonResponse:
@@ -737,7 +741,14 @@ def api_dryer_ping(request: HttpRequest, path: str = "") -> JsonResponse:
         status.last_raw = f"uid= H={humidity} T={temp} ev={event}"
         status.save()
         print("═" * 60)
-        return JsonResponse({"ok": True, "message": "ping", "event": event})
+        # Нет зонта → реле выключены
+        return JsonResponse({
+            "ok": True,
+            "message": "ping",
+            "event": event,
+            "heater": False,
+            "fan": False,
+        })
 
     try:
         obj = TrackedObject.objects.get(irf_tag=uid)
@@ -747,7 +758,10 @@ def api_dryer_ping(request: HttpRequest, path: str = "") -> JsonResponse:
         status.last_raw  = f"uid={uid}(unknown) H={humidity} T={temp} ev={event}"
         status.save()
         print("═" * 60)
-        return JsonResponse({"ok": False, "message": "umbrella not found"}, status=404)
+        return JsonResponse(
+            {"ok": False, "message": "umbrella not found", "heater": False, "fan": False},
+            status=404,
+        )
 
     if humidity is not None: obj.last_humidity = humidity
     if temp     is not None: obj.last_temp     = temp
@@ -801,6 +815,44 @@ def api_dryer_ping(request: HttpRequest, path: str = "") -> JsonResponse:
     status.save()
 
     print(f"   💾 saved: is_drying={obj.is_drying} needs_drying={obj.needs_drying}")
+
+    # 🎯 РЕШАЕМ, ЧТО СКАЗАТЬ РЕЛЕ СУШИЛКИ
+    # Порог сушки: влажность > 40% → греем и кулер.
+    # Защита: температура >= 90°C → ТЭН выключаем, кулер оставляем.
+    HUMIDITY_DRY_MAX = 40.0
+    TEMP_MAX         = 90.0
+
+    heater_on = False
+    fan_on    = False
+
+    if event in ("finished", "failed"):
+        # Сушка завершена/сбой → всё выключить
+        heater_on = False
+        fan_on    = False
+    else:
+        too_hot = (temp is not None and temp >= TEMP_MAX)
+
+        if too_hot:
+            # Перегрев: ТЭН OFF, кулер ON (остужаем)
+            heater_on = False
+            fan_on    = True
+            print(f"   ⚠ ПЕРЕГРЕВ T={temp} >= {TEMP_MAX} → ТЭН OFF, кулер ON")
+        elif humidity is not None:
+            if humidity > HUMIDITY_DRY_MAX:
+                # Влажно → сушим
+                heater_on = True
+                fan_on    = True
+            else:
+                # Сухо → всё выключить
+                heater_on = False
+                fan_on    = False
+        else:
+            # Нет данных о влажности и не перегрев:
+            # не греем вслепую, но кулер крутим, пока зонт в сушилке
+            heater_on = False
+            fan_on    = bool(obj.is_drying)
+
+    print(f"   🎛  команда реле: heater={heater_on} fan={fan_on}")
     print("═" * 60)
 
     return JsonResponse({
@@ -809,10 +861,14 @@ def api_dryer_ping(request: HttpRequest, path: str = "") -> JsonResponse:
         "event":    event,
         "humidity": humidity,
         "temp":     temp,
+        "heater":   heater_on,
+        "fan":      fan_on,
     })
 
 
+# =====================================================================
 #  API: статус сушилки
+# =====================================================================
 
 @require_GET
 def api_dryer_status(request: HttpRequest) -> JsonResponse:
@@ -841,7 +897,9 @@ def api_dryer_status(request: HttpRequest) -> JsonResponse:
     })
 
 
+# =====================================================================
 #  API: ручное завершение сушки
+# =====================================================================
 
 @csrf_exempt
 @require_POST
