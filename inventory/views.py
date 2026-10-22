@@ -817,6 +817,11 @@ def api_dryer_ping(request: HttpRequest, path: str = "") -> JsonResponse:
     print(f"   💾 saved: is_drying={obj.is_drying} needs_drying={obj.needs_drying}")
 
     # 🎯 РЕШАЕМ, ЧТО СКАЗАТЬ РЕЛЕ СУШИЛКИ
+    # Порог сушки: влажность > 40% → греем и кулер.
+    # Защита: температура >= 90°C → ТЭН выключаем, кулер оставляем.
+    HUMIDITY_DRY_MAX = 40.0
+    TEMP_MAX         = 90.0
+
     heater_on = False
     fan_on    = False
 
@@ -824,25 +829,28 @@ def api_dryer_ping(request: HttpRequest, path: str = "") -> JsonResponse:
         # Сушка завершена/сбой → всё выключить
         heater_on = False
         fan_on    = False
-    elif humidity is not None:
-        if humidity > HUMIDITY_WET:
-            # Мокрый → полная сушка
-            heater_on = True
-            fan_on    = True
-        elif humidity < HUMIDITY_DRY:
-            # Сухой → всё выключить
-            heater_on = False
-            fan_on    = False
-        else:
-            # Промежуток → продолжаем сушить
-            heater_on = True
-            fan_on    = True
     else:
-        # 🔧 ИЗМЕНЕНО: нет данных о влажности (DHT11 не успел / NaN),
-        # но зонт в сушилке → греем на полную, а не только вентилятор.
-        # Иначе ТЭН вообще не щёлкает на первом пинге event="start".
-        heater_on = bool(obj.is_drying)
-        fan_on    = bool(obj.is_drying)
+        too_hot = (temp is not None and temp >= TEMP_MAX)
+
+        if too_hot:
+            # Перегрев: ТЭН OFF, кулер ON (остужаем)
+            heater_on = False
+            fan_on    = True
+            print(f"   ⚠ ПЕРЕГРЕВ T={temp} >= {TEMP_MAX} → ТЭН OFF, кулер ON")
+        elif humidity is not None:
+            if humidity > HUMIDITY_DRY_MAX:
+                # Влажно → сушим
+                heater_on = True
+                fan_on    = True
+            else:
+                # Сухо → всё выключить
+                heater_on = False
+                fan_on    = False
+        else:
+            # Нет данных о влажности и не перегрев:
+            # не греем вслепую, но кулер крутим, пока зонт в сушилке
+            heater_on = False
+            fan_on    = bool(obj.is_drying)
 
     print(f"   🎛  команда реле: heater={heater_on} fan={fan_on}")
     print("═" * 60)
