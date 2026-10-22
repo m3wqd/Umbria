@@ -87,7 +87,7 @@ def _rent_response(payload: dict, *, status: int = 200) -> JsonResponse:
     SOUND_MAP = {
         "take":        1,
         "wait_return": 2,
-        "return":      1,
+        "return":      3,
         "ok":          1,
         "empty":       5,
     }
