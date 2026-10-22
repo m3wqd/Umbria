@@ -838,8 +838,10 @@ def api_dryer_ping(request: HttpRequest, path: str = "") -> JsonResponse:
             heater_on = True
             fan_on    = True
     else:
-        # Нет данных о влажности, но зонт в сушилке → только вентилятор
-        heater_on = False
+        # 🔧 ИЗМЕНЕНО: нет данных о влажности (DHT11 не успел / NaN),
+        # но зонт в сушилке → греем на полную, а не только вентилятор.
+        # Иначе ТЭН вообще не щёлкает на первом пинге event="start".
+        heater_on = bool(obj.is_drying)
         fan_on    = bool(obj.is_drying)
 
     print(f"   🎛  команда реле: heater={heater_on} fan={fan_on}")
