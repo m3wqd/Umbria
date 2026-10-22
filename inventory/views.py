@@ -74,7 +74,7 @@ def _rent_response(payload: dict, *, status: int = 200) -> JsonResponse:
     """
     action = str(payload.get("action", ""))
 
-    # Нормализуем нестандартные action под прошивку
+    # Нормализуем нестандартные действия под прошивку
     if action == "wait_umbrella":
         mode = payload.get("mode", "take")
         payload["action"] = "wait_return" if mode == "return" else "ok"
@@ -510,7 +510,7 @@ def home(request: HttpRequest) -> HttpResponse:
 
 
 # =====================================================================
-#  Веб-интерфейс: панель оператора (тут подтверждаем возвраты вручную)
+#  Веб-интерфейс: панель оператора
 # =====================================================================
 
 @login_required
@@ -741,7 +741,14 @@ def api_dryer_ping(request: HttpRequest, path: str = "") -> JsonResponse:
         status.last_raw = f"uid= H={humidity} T={temp} ev={event}"
         status.save()
         print("═" * 60)
-        return JsonResponse({"ok": True, "message": "ping", "event": event})
+        # Нет зонта → реле выключены
+        return JsonResponse({
+            "ok": True,
+            "message": "ping",
+            "event": event,
+            "heater": False,
+            "fan": False,
+        })
 
     try:
         obj = TrackedObject.objects.get(irf_tag=uid)
@@ -751,7 +758,10 @@ def api_dryer_ping(request: HttpRequest, path: str = "") -> JsonResponse:
         status.last_raw  = f"uid={uid}(unknown) H={humidity} T={temp} ev={event}"
         status.save()
         print("═" * 60)
-        return JsonResponse({"ok": False, "message": "umbrella not found"}, status=404)
+        return JsonResponse(
+            {"ok": False, "message": "umbrella not found", "heater": False, "fan": False},
+            status=404,
+        )
 
     if humidity is not None: obj.last_humidity = humidity
     if temp     is not None: obj.last_temp     = temp
@@ -805,6 +815,34 @@ def api_dryer_ping(request: HttpRequest, path: str = "") -> JsonResponse:
     status.save()
 
     print(f"   💾 saved: is_drying={obj.is_drying} needs_drying={obj.needs_drying}")
+
+    # 🎯 РЕШАЕМ, ЧТО СКАЗАТЬ РЕЛЕ СУШИЛКИ
+    heater_on = False
+    fan_on    = False
+
+    if event in ("finished", "failed"):
+        # Сушка завершена/сбой → всё выключить
+        heater_on = False
+        fan_on    = False
+    elif humidity is not None:
+        if humidity > HUMIDITY_WET:
+            # Мокрый → полная сушка
+            heater_on = True
+            fan_on    = True
+        elif humidity < HUMIDITY_DRY:
+            # Сухой → всё выключить
+            heater_on = False
+            fan_on    = False
+        else:
+            # Промежуток → продолжаем сушить
+            heater_on = True
+            fan_on    = True
+    else:
+        # Нет данных о влажности, но зонт в сушилке → только вентилятор
+        heater_on = False
+        fan_on    = bool(obj.is_drying)
+
+    print(f"   🎛  команда реле: heater={heater_on} fan={fan_on}")
     print("═" * 60)
 
     return JsonResponse({
@@ -813,6 +851,8 @@ def api_dryer_ping(request: HttpRequest, path: str = "") -> JsonResponse:
         "event":    event,
         "humidity": humidity,
         "temp":     temp,
+        "heater":   heater_on,
+        "fan":      fan_on,
     })
 
 
